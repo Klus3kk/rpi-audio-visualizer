@@ -4,6 +4,10 @@ import time
 from firmware.led.leds0_driver import Leds0Driver
 from firmware.effects.bars import BarsEffect
 from firmware.effects.wave import WaveEffect
+from firmware.effects.vu_meter import VUMeterEffect
+from firmware.effects.oscilloscope import OscilloscopeEffect
+from firmware.effects.radial_pulse import RadialPulseEffect
+from firmware.effects.spectral_fire import SpectralFireEffect
 
 def clamp8(v):
     if v < 0: return 0
@@ -29,7 +33,12 @@ class LedEngine:
         self._effects = {
             "bars": BarsEffect(w=16, h=16),
             "wave": WaveEffect(w=16, h=16),
+            "vu": VUMeterEffect(w=16, h=16),
+            "scope": OscilloscopeEffect(w=16, h=16),
+            "radial": RadialPulseEffect(w=16, h=16),
+            "fire": SpectralFireEffect(w=16, h=16),
         }
+
 
     def start(self):
         self._t = threading.Thread(target=self._run, daemon=True)
@@ -49,8 +58,10 @@ class LedEngine:
                 feats = self.audio.get_features()
 
                 fx = self._effects.get(d.effect, self._effects["bars"])
-                frame = fx.update(feats, dt)
+                params = {"intensity": d.intensity, "color_mode": d.color_mode}
+                frame = fx.update(feats, dt, params) if fx.update.__code__.co_argcount >= 4 else fx.update(feats, dt)
                 frame = apply_brightness(frame, d.brightness)
+
 
                 for i, rgb in enumerate(frame):
                     self._leds.set_pixel(i, rgb)

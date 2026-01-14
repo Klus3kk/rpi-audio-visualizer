@@ -37,19 +37,19 @@ class AudioEngine:
             }
 
     def _make_cfg_sig(self, d):
-        # signature: jeśli się zmieni, restartujemy stream
-        return (d.samplerate, d.blocksize, d.audio_device)
+        return (int(d.samplerate), int(d.blocksize), d.input_device)
 
     def _start_stream(self, d):
         self._cap = AlsaCapture(
-            samplerate=d.samplerate,
-            blocksize=d.blocksize,
+            samplerate=int(d.samplerate),
+            blocksize=int(d.blocksize),
             channels=1,
-            device=d.audio_device,
+            device=d.input_device,
         ).start()
+
         self._fx = FeatureExtractor(
-            samplerate=d.samplerate,
-            nfft=d.blocksize,
+            samplerate=int(d.samplerate),
+            nfft=int(d.blocksize),
             bands=16,
         )
         self._cfg_sig = self._make_cfg_sig(d)
@@ -76,10 +76,10 @@ class AudioEngine:
                     self._start_stream(d)
 
                 x = self._cap.read(timeout=1.0)
-                d = self.state.get()
+
+                # gain + smoothing sterowane z AppState
                 x = x * float(d.gain)
                 feats = self._fx.compute(x, smoothing=float(d.smoothing))
-
 
                 with self._lock:
                     self._features = feats

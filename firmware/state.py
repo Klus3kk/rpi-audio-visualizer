@@ -3,20 +3,27 @@ from dataclasses import dataclass
 
 @dataclass
 class AppStateData:
-    mode: str = "analog"              # "analog" | "player" | "bluetooth"
-    effect: str = "bars"              # nazwa efektu
+    # tryby: mic = mikrofon wychodzi + analiza
+    # bluetooth = telefon -> Pi (A2DP sink) + analiza + LCD metadata
+    # local = lokalny player (np. mpv) + analiza + LCD metadata (później)
+    mode: str = "mic"                 # "mic" | "bluetooth" | "local"
+
+    effect: str = "bars"              # bars/wave/vu/scope/radial/fire
     brightness: float = 0.55          # limit mocy LED 0..1
 
-    intensity: float = 0.75           # “jak mocno wali efekt” 0..1 (wspólny knob)
-    gain: float = 1.0                 # gain audio do analizy (0.2..5.0)
-    smoothing: float = 0.65           # wygładzanie pasm (0..0.95)
+    intensity: float = 0.75           # 0..1 (moc efektu)
+    gain: float = 1.0                 # gain wejścia do analizy / passthrough
+    smoothing: float = 0.65           # 0..0.95 wygładzanie pasm
     color_mode: str = "auto"          # "auto" | "mono" | "rainbow"
 
-    running: bool = True
+    # audio routing:
+    input_device: object = None       # sounddevice input index lub None=default
+    output_device: object = None      # sounddevice output index lub None=default
+    passthrough: bool = True          # w mic mode: czy ma “wychodzić”
+
     samplerate: int = 44100
     blocksize: int = 1024
-    audio_device: object = None
-
+    running: bool = True
 
 class AppState:
     def __init__(self):
