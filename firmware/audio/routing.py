@@ -1,34 +1,29 @@
 import sounddevice as sd
 
-# === PLACEHOLDER NAMES ===
-DEFAULT_INPUT_NAMES = {
-    "analog": [
-        "USB", "Microphone", "Mic", "Audio", "Sound Card"
-    ],
-    "player": [
-        "Loopback", "loopin", "ALoop", "snd-aloop"
-    ],
-    "bluetooth": [
-        "Bluetooth", "BT", "BlueZ", "A2DP"
-    ],
-}
-
-def find_device_index(mode: str):
-    devices = sd.query_devices()
-    needles = DEFAULT_INPUT_NAMES.get(mode, [])
-
-    for i, d in enumerate(devices):
-        name = (d.get("name") or "").lower()
+def pick_input_device(prefer_substrings):
+    devs = sd.query_devices()
+    # 1) preferowane po nazwie
+    for i, d in enumerate(devs):
         if d.get("max_input_channels", 0) <= 0:
             continue
-
-        for needle in needles:
-            if needle.lower() in name:
+        name = (d.get("name") or "").lower()
+        for s in prefer_substrings:
+            if s.lower() in name:
                 return i
-
-    # fallback: pierwszy input z kanałami
-    for i, d in enumerate(devices):
+    # 2) fallback: pierwszy input z kanałami
+    for i, d in enumerate(devs):
         if d.get("max_input_channels", 0) > 0:
             return i
-
     return None
+
+def input_for_mode(mode: str):
+    if mode == "bluetooth":
+        # loopback capture (snd-aloop) – to jest nasz “tap”
+        return pick_input_device(["loopback", "aloop", "snd_aloop"])
+    if mode == "mic":
+        # USB mic – best-effort
+        return pick_input_device(["usb", "microphone", "mic"])
+    if mode == "local":
+        return pick_input_device(["loopback", "aloop", "snd_aloop"])
+
+    return pick_input_device([])

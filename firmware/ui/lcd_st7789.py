@@ -18,6 +18,22 @@ class LcdSt7789:
         d = ImageDraw.Draw(img)
 
         nowp = nowp or {"source": state.mode, "connected": False, "title": "", "artist": "", "album": ""}
+        
+        # progress (dla local)
+        if nowp.get("source") == "local" and nowp.get("connected"):
+            tpos = float(nowp.get("time_pos") or 0.0)
+            dur = float(nowp.get("duration") or 0.0)
+            pct = 0.0 if dur <= 0 else max(0.0, min(1.0, tpos / dur))
+
+            bar_x, bar_y, bar_w, bar_h = 10, 220, self.w - 20, 10
+            d.rectangle([bar_x, bar_y, bar_x + bar_w, bar_y + bar_h], outline="white")
+            d.rectangle([bar_x, bar_y, bar_x + int(bar_w * pct), bar_y + bar_h], fill="white")
+
+            def fmt(sec):
+                sec = int(sec)
+                return f"{sec//60}:{sec%60:02d}"
+
+            d.text((10, 240), f"{fmt(tpos)} / {fmt(dur)}", font=self.font, fill="white")
 
         d.text((10, 10), f"MODE: {state.mode}", font=self.font, fill="white")
         d.text((10, 30), f"EFFECT: {state.effect}", font=self.font, fill="white")
