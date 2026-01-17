@@ -3,7 +3,7 @@ import sounddevice as sd
 import numpy as np
 
 class AlsaCapture:
-    def __init__(self, samplerate=44100, blocksize=1024, channels=1, device=None):
+    def __init__(self, samplerate=44100, blocksize=1024, channels=2, device=None):
         self.samplerate = int(samplerate)
         self.blocksize = int(blocksize)
         self.channels = int(channels)
