@@ -8,31 +8,35 @@ def serpentine_index(x, y, w=16, h=16, origin_bottom=True):
         return y * w + x
     return y * w + (w - 1 - x)
 
-def _smoothstep(x):
-    x = np.clip(x, 0.0, 1.0)
-    return x * x * (3.0 - 2.0 * x)
+def _clamp01(x):
+    return 0.0 if x < 0.0 else (1.0 if x > 1.0 else float(x))
+
+def _ema(prev, x, a):
+    return prev * a + x * (1.0 - a)
 
 class BarsEffect:
     """
-    Bars 16x16 tuned for mic:
-    - gate kills idle jitter
-    - shaping compresses noise floor + balances bass/treble
-    - "musical" mapping: columns grouped from low->high
+    Stable bars: 20Hz..20kHz left->right (depends on your log edges).
+    - No per-frame rescaling artifacts (handled in FeatureExtractor).
+    - AGC for loud sounds (tolerant).
+    - Envelope follower for smooth motion.
     """
     def __init__(self, w=16, h=16):
         self.w = w
         self.h = h
-        self.level = np.zeros(w, dtype=np.float32)  # 0..h-1
+
+        self.level = np.zeros(w, dtype=np.float32)  # 0..(h-1)
         self.peak  = np.zeros(w, dtype=np.float32)
 
-        # optional: idle freeze
-        self._idle_timer = 0.0
-        self._last_frame = [(0,0,0)] * (w*h)
+        # AGC state
+        self._gain = 1.0
+        self._ref  = 0.18   # target “average” energy after gain
 
-    def _prep_vals(self, bands):
-        w = self.w
+    def update(self, features, dt, params=None):
+        bands = features["bands"]
+        w, h = self.w, self.h
 
-        # resample bands -> 16 columns
+        # resample -> 16 columns
         if bands.shape[0] != w:
             xi = np.linspace(0, bands.shape[0] - 1, w)
             vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
@@ -41,85 +45,85 @@ class BarsEffect:
 
         vals = np.clip(vals, 0.0, 1.0)
 
-        # --- 1) noise gate (critical for mic) ---
-        # below gate => 0 (no movement)
-        gate = 0.08
+        # spatial smoothing (kills single-column twitch)
+        vals = 0.25*np.roll(vals, 1) + 0.5*vals + 0.25*np.roll(vals, -1)
+
+        # noise gate (keep silence calm)
+        gate = 0.05
         vals = (vals - gate) / max(1e-6, (1.0 - gate))
         vals = np.clip(vals, 0.0, 1.0)
 
-        # --- 2) dynamic shaping / compression ---
-        # reduce micro jitter, keep transients
-        vals = _smoothstep(vals)
+        # AGC based on robust average (not max)
+        avg = float(np.mean(vals))
+        # desired gain to push avg -> ref, limited
+        want = self._ref / max(1e-6, avg)
+        want = max(0.6, min(3.0, want))
 
-        # --- 3) spectral tilt compensation ---
-        # mic noise often lights highs; give lows a bit more weight, highs less
-        # weights from left(low) to right(high)
-        x = np.linspace(0.0, 1.0, w).astype(np.float32)
-        # 1.15 at bass -> 0.75 at treble
-        weights = 1.15 - 0.40 * x
-        vals = np.clip(vals * weights, 0.0, 1.0)
+        # slow gain changes (prevents pumping)
+        # time-constant ~0.8s
+        a = float(np.exp(-dt / 0.8))
+        self._gain = _ema(self._gain, want, a)
 
-        # --- 4) group smoothing across columns ---
-        # prevents "salt & pepper" dancing
-        vals = 0.25*np.roll(vals,1) + 0.5*vals + 0.25*np.roll(vals,-1)
+        vals = np.clip(vals * self._gain, 0.0, 1.0)
 
-        return np.clip(vals, 0.0, 1.0)
+        # gentle compression (tolerant for loud, less twitch for quiet)
+        # gamma < 1 expands quiet; gamma >1 compresses quiet
+        gamma = 0.75
+        vals = np.power(vals, gamma).astype(np.float32)
 
-    def update(self, features, dt):
-        bands = features["bands"]
-        w, h = self.w, self.h
-
-        vals = self._prep_vals(bands)
-
-        # global idle detection: if everything quiet, freeze (optional)
-        energy = float(np.mean(vals))
-        if energy < 0.02:
-            self._idle_timer += float(dt)
-        else:
-            self._idle_timer = 0.0
-
-        # if quiet for a moment, return last frame (stops constant micro-movement)
-        if self._idle_timer > 0.35:
-            return self._last_frame
-
+        # map to pixel height (float)
         target = vals * (h - 1)
 
-        # physics: separate attack/fall using dt (stable at any fps)
-        # attack is implicit: immediate rise. fall controls stability.
-        fall = float(dt) * 5.0          # was 8.0 (too twitchy for mic)
-        peak_fall = float(dt) * 2.0     # was 3.0
+        # envelope follower (attack/release in seconds)
+        attack_tau = 0.04   # fast rise
+        release_tau = 0.18  # slower fall
+        a_att = float(np.exp(-dt / attack_tau))
+        a_rel = float(np.exp(-dt / release_tau))
+
+        # peak fall time
+        peak_tau = 0.35
+        a_peak = float(np.exp(-dt / peak_tau))
 
         for x in range(w):
             t = target[x]
-            if t > self.level[x]:
-                # controlled attack: not infinite jump (reduces flicker)
-                self.level[x] = self.level[x] + (t - self.level[x]) * min(1.0, float(dt) * 20.0)
+            cur = self.level[x]
+            if t > cur:
+                cur = _ema(cur, t, a_att)
             else:
-                self.level[x] = max(0.0, self.level[x] - fall)
+                cur = _ema(cur, t, a_rel)
+            self.level[x] = cur
 
-            self.peak[x] = max(self.peak[x], self.level[x])
-            self.peak[x] = max(0.0, self.peak[x] - peak_fall)
+            # peak hold
+            self.peak[x] = max(self.peak[x] * a_peak, cur)
 
         frame = [(0, 0, 0)] * (w * h)
 
         for x in range(w):
-            hh = int(self.level[x])
-            py = int(self.peak[x])
+            hh = float(self.level[x])          # 0..h-1 float
+            py = int(round(float(self.peak[x])))
 
-            # hue by X (keeps your rainbow look)
             hue = x / max(1, (w - 1))
             r, g, b = [int(c * 255) for c in colorsys.hsv_to_rgb(hue, 1.0, 1.0)]
 
-            # fill bar
-            for y in range(hh + 1):
+            full = int(hh)
+            frac = hh - full
+
+            # fill full pixels
+            for y in range(full + 1):
                 idx = serpentine_index(x, y, w=w, h=h, origin_bottom=True)
                 v = 0.55 + 0.45 * (y / max(1, h - 1))
                 frame[idx] = (int(r * v), int(g * v), int(b * v))
 
-            # peak hold
+            # fractional top pixel for smoothness
+            topy = full + 1
+            if 0 <= topy < h and frac > 0.05:
+                idx = serpentine_index(x, topy, w=w, h=h, origin_bottom=True)
+                v = (0.55 + 0.45 * (topy / max(1, h - 1))) * frac
+                frame[idx] = (int(r * v), int(g * v), int(b * v))
+
+            # peak pixel
             if 0 <= py < h:
                 pidx = serpentine_index(x, py, w=w, h=h, origin_bottom=True)
                 frame[pidx] = (255, 255, 255)
 
-        self._last_frame = frame
         return frame
