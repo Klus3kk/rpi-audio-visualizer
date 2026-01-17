@@ -17,7 +17,7 @@ def _crc8(data: bytes) -> int:
                 crc = (crc << 1) & 0xFF
     return crc
 
-class EspSerialDriver:
+class Esp32SerialDriver:
     """
     Protokół zgodny z ESP32 receiver:
       AA 55 <frame_id> <len_lo> <len_hi> <payload RGB...> <crc8(payload)>
