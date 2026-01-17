@@ -18,7 +18,7 @@ def apply_power_limit(frame, limit=0.55):
     return out
 
 def main():
-    leds = Esp32SerialDriver(port="/dev/ttyUSB0", baud=921600, num_leds=256)
+    leds = Esp32SerialDriver(port="/dev/ttyUSB0", baud=115200, num_leds=256)
 
     block = 1024
     sr = 44100
