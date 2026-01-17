@@ -19,8 +19,8 @@ SR = 44100
 BLOCK = 1024
 DEVICE = int(os.environ.get("AUDIO_DEV", "2"))  # HyperX = card 2
 
-GAIN = 2.0          # reguluj czułość
-SMOOTH = 0.6        # wygładzenie
+GAIN = 5.0          # reguluj czułość
+SMOOTH = 0.3        # wygładzenie
 
 def crc8(data):
     crc = 0
@@ -41,8 +41,8 @@ def make_bars(level):
             if 15 - y <= h:
                 i = (y * 16 + x) * 3
                 buf[i+0] = 0
-                buf[i+1] = 200
-                buf[i+2] = 40
+                buf[i+1] = 100
+                buf[i+2] = 20
     return buf
 
 def main():

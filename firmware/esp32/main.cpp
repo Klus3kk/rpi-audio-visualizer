@@ -8,10 +8,10 @@
 #define DATA_PIN 18
 #define LED_TYPE WS2812B
 #define COLOR_ORDER GRB
-#define BRIGHTNESS 30
+#define BRIGHTNESS 10
 
-static const uint32_t WATCHDOG_MS = 400;
-static const uint32_t SERIAL_BAUD = 921600;
+static const uint32_t SERIAL_BAUD = 115200;   // ważne: ustawimy tak samo na Pi
+static const uint32_t WATCHDOG_MS = 600;
 
 CRGB leds[NUM_LEDS];
 
@@ -33,8 +33,6 @@ static uint8_t crc8(const uint8_t* data, size_t len) {
   return crc;
 }
 
-static uint32_t lastFrameMs = 0;
-
 enum class RxState { SYNC1, SYNC2, FRAME_ID, LEN1, LEN2, PAYLOAD, CRC };
 static RxState st = RxState::SYNC1;
 
@@ -43,12 +41,7 @@ static uint16_t wantLen = 0;
 static uint16_t got = 0;
 
 static uint8_t payload[NUM_LEDS * 3];
-static uint8_t recvCrc = 0;
-
-static void clearLeds() {
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
-}
+static uint32_t lastOkFrameMs = 0;
 
 static void applyPayload() {
   int p = 0;
@@ -65,20 +58,29 @@ static void applyPayload() {
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
-  delay(200);
+  delay(150);
 
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
-  clearLeds();
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
 
-  lastFrameMs = millis();
+  // Boot marker: krótkie mignięcie na fiolet
+  fill_solid(leds, NUM_LEDS, CRGB(80, 0, 120));
+  FastLED.show();
+  delay(150);
+  fill_solid(leds, NUM_LEDS, CRGB::Black);
+  FastLED.show();
+
+  lastOkFrameMs = millis();
 }
 
 void loop() {
-  // watchdog: jeśli brak ramek -> off
-  if (millis() - lastFrameMs > WATCHDOG_MS) {
-    clearLeds();
-    lastFrameMs = millis();
+  // watchdog: jeśli brak poprawnych ramek -> gaś
+  if (millis() - lastOkFrameMs > WATCHDOG_MS) {
+    fill_solid(leds, NUM_LEDS, CRGB::Black);
+    FastLED.show();
+    // nie resetuj lastOkFrameMs, żeby stale było czarne aż do pierwszej poprawnej ramki
   }
 
   while (Serial.available() > 0) {
@@ -90,8 +92,11 @@ void loop() {
         break;
 
       case RxState::SYNC2:
-        if (b == 0x55) st = RxState::FRAME_ID;
-        else st = RxState::SYNC1;
+        if (b == 0x55) {
+          st = RxState::FRAME_ID;
+        } else {
+          st = RxState::SYNC1;
+        }
         break;
 
       case RxState::FRAME_ID:
@@ -119,14 +124,15 @@ void loop() {
         if (got >= wantLen) st = RxState::CRC;
         break;
 
-      case RxState::CRC:
-        recvCrc = b;
-        if (crc8(payload, wantLen) == recvCrc) {
+      case RxState::CRC: {
+        uint8_t recv = b;
+        uint8_t calc = crc8(payload, wantLen);
+        if (recv == calc) {
           applyPayload();
-          lastFrameMs = millis();
+          lastOkFrameMs = millis();
         }
         st = RxState::SYNC1;
-        break;
+      } break;
     }
   }
 }
