@@ -62,6 +62,7 @@ void setup() {
 
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, 900);
   fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.show();
 

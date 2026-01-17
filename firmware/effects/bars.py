@@ -8,35 +8,52 @@ def serpentine_index(x, y, w=16, h=16, origin_bottom=True):
         return y * w + x
     return y * w + (w - 1 - x)
 
-def _clamp01(x):
-    return 0.0 if x < 0.0 else (1.0 if x > 1.0 else float(x))
-
-def _ema(prev, x, a):
-    return prev * a + x * (1.0 - a)
+def _clamp01(a):
+    return 0.0 if a < 0.0 else (1.0 if a > 1.0 else float(a))
 
 class BarsEffect:
     """
-    Stable bars: 20Hz..20kHz left->right (depends on your log edges).
-    - No per-frame rescaling artifacts (handled in FeatureExtractor).
-    - AGC for loud sounds (tolerant).
-    - Envelope follower for smooth motion.
+    Philosophy:
+    - if input is quiet / mic off => COMPLETELY STATIC (black, no jitter)
+    - low->high left->right
+    - smooth motion only when real signal is present
+    - tolerant to loud sounds (compression)
     """
     def __init__(self, w=16, h=16):
         self.w = w
         self.h = h
 
-        self.level = np.zeros(w, dtype=np.float32)  # 0..(h-1)
-        self.peak  = np.zeros(w, dtype=np.float32)
+        self.level = np.zeros(w, dtype=np.float32)
 
-        # AGC state
-        self._gain = 1.0
-        self._ref  = 0.18   # target “average” energy after gain
+        # "silence detector"
+        self._silent_for = 0.0
 
-    def update(self, features, dt, params=None):
-        bands = features["bands"]
+        # last frame for hard freeze (optional)
+        self._black = [(0,0,0)] * (w*h)
+
+    def update(self, features, dt):
         w, h = self.w, self.h
 
-        # resample -> 16 columns
+        # ---- 1) HARD silence logic (this is what you want) ----
+        # When mic is off / disconnected, RMS will usually drop very low.
+        rms = float(features.get("rms", 0.0))
+
+        # Tune this. For many USB mics, silence RMS ~ 0.001..0.01.
+        # If mic is "off" it can be 0.0 or random; we treat both as silence.
+        RMS_GATE = 0.012
+
+        if rms < RMS_GATE or not np.isfinite(rms):
+            self._silent_for += float(dt)
+        else:
+            self._silent_for = 0.0
+
+        # after 0.15s of silence => FORCE OFF immediately
+        if self._silent_for > 0.15:
+            self.level[:] = 0.0
+            return self._black
+
+        # ---- 2) get bands (already 0..1 from FeatureExtractor) ----
+        bands = features["bands"]
         if bands.shape[0] != w:
             xi = np.linspace(0, bands.shape[0] - 1, w)
             vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
@@ -45,85 +62,51 @@ class BarsEffect:
 
         vals = np.clip(vals, 0.0, 1.0)
 
-        # spatial smoothing (kills single-column twitch)
-        vals = 0.25*np.roll(vals, 1) + 0.5*vals + 0.25*np.roll(vals, -1)
-
-        # noise gate (keep silence calm)
-        gate = 0.05
-        vals = (vals - gate) / max(1e-6, (1.0 - gate))
+        # ---- 3) suppress residual jitter (band gate) ----
+        BAND_GATE = 0.06
+        vals = (vals - BAND_GATE) / max(1e-6, (1.0 - BAND_GATE))
         vals = np.clip(vals, 0.0, 1.0)
 
-        # AGC based on robust average (not max)
-        avg = float(np.mean(vals))
-        # desired gain to push avg -> ref, limited
-        want = self._ref / max(1e-6, avg)
-        want = max(0.6, min(3.0, want))
+        # ---- 4) tolerant to loud sounds (compression) ----
+        # sqrt expands low levels a bit, compresses high peaks
+        vals = np.sqrt(vals)
 
-        # slow gain changes (prevents pumping)
-        # time-constant ~0.8s
-        a = float(np.exp(-dt / 0.8))
-        self._gain = _ema(self._gain, want, a)
-
-        vals = np.clip(vals * self._gain, 0.0, 1.0)
-
-        # gentle compression (tolerant for loud, less twitch for quiet)
-        # gamma < 1 expands quiet; gamma >1 compresses quiet
-        gamma = 0.75
-        vals = np.power(vals, gamma).astype(np.float32)
-
-        # map to pixel height (float)
-        target = vals * (h - 1)
-
-        # envelope follower (attack/release in seconds)
-        attack_tau = 0.04   # fast rise
-        release_tau = 0.18  # slower fall
+        # ---- 5) stable smoothing only while signal exists ----
+        # attack fast, release slower; no peaks.
+        attack_tau  = 0.03
+        release_tau = 0.12
         a_att = float(np.exp(-dt / attack_tau))
         a_rel = float(np.exp(-dt / release_tau))
 
-        # peak fall time
-        peak_tau = 0.35
-        a_peak = float(np.exp(-dt / peak_tau))
+        target = vals * (h - 1)
 
         for x in range(w):
             t = target[x]
-            cur = self.level[x]
+            cur = float(self.level[x])
             if t > cur:
-                cur = _ema(cur, t, a_att)
+                self.level[x] = cur * a_att + t * (1.0 - a_att)
             else:
-                cur = _ema(cur, t, a_rel)
-            self.level[x] = cur
+                self.level[x] = cur * a_rel + t * (1.0 - a_rel)
 
-            # peak hold
-            self.peak[x] = max(self.peak[x] * a_peak, cur)
-
-        frame = [(0, 0, 0)] * (w * h)
-
+        # ---- 6) render (classic rainbow, bottom->top fill) ----
+        frame = [(0,0,0)] * (w*h)
         for x in range(w):
-            hh = float(self.level[x])          # 0..h-1 float
-            py = int(round(float(self.peak[x])))
-
-            hue = x / max(1, (w - 1))
-            r, g, b = [int(c * 255) for c in colorsys.hsv_to_rgb(hue, 1.0, 1.0)]
-
+            hh = float(self.level[x])
             full = int(hh)
             frac = hh - full
 
-            # fill full pixels
+            hue = x / max(1, w-1)
+            r,g,b = [int(c*255) for c in colorsys.hsv_to_rgb(hue, 1.0, 1.0)]
+
+            # fill solid pixels
             for y in range(full + 1):
                 idx = serpentine_index(x, y, w=w, h=h, origin_bottom=True)
-                v = 0.55 + 0.45 * (y / max(1, h - 1))
-                frame[idx] = (int(r * v), int(g * v), int(b * v))
+                frame[idx] = (r, g, b)
 
             # fractional top pixel for smoothness
             topy = full + 1
             if 0 <= topy < h and frac > 0.05:
                 idx = serpentine_index(x, topy, w=w, h=h, origin_bottom=True)
-                v = (0.55 + 0.45 * (topy / max(1, h - 1))) * frac
-                frame[idx] = (int(r * v), int(g * v), int(b * v))
-
-            # peak pixel
-            if 0 <= py < h:
-                pidx = serpentine_index(x, py, w=w, h=h, origin_bottom=True)
-                frame[pidx] = (255, 255, 255)
+                frame[idx] = (int(r*frac), int(g*frac), int(b*frac))
 
         return frame
