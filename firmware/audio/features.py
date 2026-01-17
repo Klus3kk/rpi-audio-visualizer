@@ -28,28 +28,41 @@ class FeatureExtractor:
             pad[: x.shape[0]] = x
             x = pad
 
+        # RMS do gate (cisza)
         rms = float(np.sqrt(np.mean(x * x) + 1e-12))
 
         xw = x * self.window
         spec = np.fft.rfft(xw)
-        mag = np.abs(spec).astype(np.float32)
-        mag[0] = 0.0
+        mag2 = (spec.real * spec.real + spec.imag * spec.imag).astype(np.float32)
+        mag2[0] = 0.0  # usuń DC
 
         band_vals = np.zeros(self.bands, dtype=np.float32)
         for i, (lo, hi) in enumerate(self.edges):
-            band_vals[i] = np.mean(mag[lo:hi]) if hi > lo else 0.0
+            if hi > lo:
+                band_vals[i] = float(np.mean(mag2[lo:hi]))
+            else:
+                band_vals[i] = 0.0
 
-        band_vals = np.log1p(band_vals)
+        # dB scale (stabilniejsze niż log1p)
+        band_db = 10.0 * np.log10(band_vals + 1e-12).astype(np.float32)
 
-        band_vals = (smoothing * self.prev_bands) + ((1.0 - smoothing) * band_vals)
-        self.prev_bands = band_vals
+        # smoothing w dB (żeby nie pompowało)
+        band_db = (smoothing * self.prev_bands) + ((1.0 - smoothing) * band_db)
+        self.prev_bands = band_db
 
-        bmin = float(np.min(band_vals))
-        bmax = float(np.max(band_vals))
-        if bmax - bmin < 1e-6:
-            bands_norm = np.zeros_like(band_vals)
-        else:
-            bands_norm = (band_vals - bmin) / (bmax - bmin)
+        # STAŁA skala: noise floor i zakres dynamiczny
+        # Te wartości stroisz 1 raz i potem działa zawsze.
+        NOISE_FLOOR_DB = -75.0   # poniżej = cisza
+        RANGE_DB = 45.0          # ile dB mapujesz do 0..1
+
+        # mapowanie do 0..1
+        bands_norm = (band_db - NOISE_FLOOR_DB) / RANGE_DB
+        bands_norm = np.clip(bands_norm, 0.0, 1.0)
+
+        # dodatkowy twardy gate: jeśli rms małe, wyzeruj
+        RMS_GATE = 0.012
+        if rms < RMS_GATE:
+            bands_norm[:] = 0.0
 
         bass = float(np.mean(bands_norm[: max(1, self.bands // 6)]))
         mid = float(np.mean(bands_norm[self.bands // 6 : 4 * self.bands // 6]))

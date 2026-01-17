@@ -8,10 +8,10 @@
 #define DATA_PIN 18
 #define LED_TYPE WS2812B
 #define COLOR_ORDER GRB
-#define BRIGHTNESS 10
+#define BRIGHTNESS 4
 
 static const uint32_t SERIAL_BAUD = 115200;   // ważne: ustawimy tak samo na Pi
-static const uint32_t WATCHDOG_MS = 600;
+static const uint32_t WATCHDOG_MS = 1000;
 
 CRGB leds[NUM_LEDS];
 
@@ -62,7 +62,7 @@ void setup() {
 
   FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
-  FastLED.setMaxPowerInVoltsAndMilliamps(5, 900);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, 500);
   fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.show();
 
@@ -81,7 +81,6 @@ void loop() {
   if (millis() - lastOkFrameMs > WATCHDOG_MS) {
     fill_solid(leds, NUM_LEDS, CRGB::Black);
     FastLED.show();
-    // nie resetuj lastOkFrameMs, żeby stale było czarne aż do pierwszej poprawnej ramki
   }
 
   while (Serial.available() > 0) {
