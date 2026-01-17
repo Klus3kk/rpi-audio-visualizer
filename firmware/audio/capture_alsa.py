@@ -32,16 +32,25 @@ class AlsaCapture:
                 pass
 
     def start(self):
-        self.stream = sd.InputStream(
-            samplerate=self.samplerate,
-            blocksize=self.blocksize,
-            channels=self.channels,
-            device=self.device,
-            dtype="float32",
-            callback=self._callback,
-        )
-        self.stream.start()
-        return self
+        last_err = None
+        for sr in (self.samplerate, 48000, 44100, 32000, 16000, 8000):
+            try:
+                self.stream = sd.InputStream(
+                    samplerate=int(sr),
+                    blocksize=self.blocksize,
+                    channels=self.channels,
+                    device=self.device,
+                    dtype="float32",
+                    callback=self._callback,
+                )
+                self.samplerate = int(sr)
+                self.stream.start()
+                return self
+            except Exception as e:
+                last_err = e
+                self.stream = None
+        raise last_err
+
 
     def read(self, timeout=1.0):
         x = self.q.get(timeout=timeout)  # shape: (blocksize, channels)

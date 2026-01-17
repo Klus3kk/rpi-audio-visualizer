@@ -21,7 +21,7 @@ class AppStateData:
     output_device: object = None      # sounddevice output index lub None=default
     passthrough: bool = True          # w mic mode: czy ma “wychodzić”
 
-    samplerate: int = 44100
+    samplerate: int = 48000
     blocksize: int = 1024
     running: bool = True
 
