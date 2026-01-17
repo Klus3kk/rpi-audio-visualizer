@@ -7,7 +7,7 @@ from firmware.effects.vu_meter import VUMeterEffect
 from firmware.effects.oscilloscope import OscilloscopeEffect
 from firmware.effects.radial_pulse import RadialPulseEffect
 from firmware.effects.spectral_fire import SpectralFireEffect
-from firmware.led.esp32_serial_driver import Esp32SerialDriver
+from firmware.led.esp32_serial_driver import EspSerialDriver
 
 def clamp8(v):
     if v < 0: return 0
@@ -46,7 +46,7 @@ class LedEngine:
         return self
 
     def _run(self):
-        self._leds = Esp32SerialDriver(port="/dev/ttyUSB0", baud=921600, num_leds=256)
+        self._leds = EspSerialDriver(num_leds=256, port="/dev/ttyUSB0", baud=115200, debug=True)
         last = time.perf_counter()
         try:
             while self.state.get().running:
