@@ -1,5 +1,5 @@
 import time
-from firmware.led.leds0_driver import Leds0Driver
+from firmware.led.esp32_serial_driver import Esp32SerialDriver
 from firmware.audio.capture_alsa import AlsaCapture
 from firmware.audio.features import FeatureExtractor
 from firmware.effects.bars import BarsEffect
@@ -18,7 +18,7 @@ def apply_power_limit(frame, limit=0.55):
     return out
 
 def main():
-    leds = Leds0Driver(num_leds=256)
+    leds = Esp32SerialDriver(port="/dev/ttyUSB0", baud=921600, num_leds=256)
 
     block = 1024
     sr = 44100
