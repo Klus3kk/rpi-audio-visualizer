@@ -36,6 +36,7 @@ def main():
             last = now
 
             features = fx.compute(x)
+            print(features["bands"]) # debug
             frame = bars.update(features, dt)
             frame = apply_power_limit(frame, limit=0.35)
 
