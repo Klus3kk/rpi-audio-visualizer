@@ -7,6 +7,25 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+// ===================== BLE UUIDs (OPCJA B) =====================
+// Jeden serwis + jedna charakterystyka CMD (write) + opcjonalna STATE (notify).
+const String kDeviceName = 'Visualizer';
+
+const String kSvc = '12345678-1234-5678-1234-56789abcdef0';
+const String kCmd = '12345678-1234-5678-1234-56789abcdef9';   // WRITE
+const String kState = '12345678-1234-5678-1234-56789abcdef8'; // NOTIFY (opcjonalne)
+
+// ===================== UI theme =====================
+
+class Retro {
+  static const bg = Color(0xFF101114);
+  static const panel = Color(0xFF1B1D22);
+  static const edge = Color(0xFF30333B);
+  static const yellow = Color(0xFFFFD166);
+  static const ok = Color(0xFF4AF2A1);
+  static const bad = Color(0xFFFF4D6D);
+}
+
 void main() => runApp(const VisualizerRemoteApp());
 
 class VisualizerRemoteApp extends StatelessWidget {
@@ -23,41 +42,21 @@ class VisualizerRemoteApp extends StatelessWidget {
     );
 
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'Visualizer',
       theme: base.copyWith(
+        scaffoldBackgroundColor: Retro.bg,
         textTheme: GoogleFonts.vt323TextTheme(base.textTheme).apply(
           bodyColor: Colors.white,
           displayColor: Colors.white,
         ),
       ),
       home: const PermissionGate(),
-      debugShowCheckedModeBanner: false,
     );
   }
 }
 
-class Retro {
-  static const bg = Color(0xFF101114);
-  static const panel = Color(0xFF1B1D22);
-  static const edge = Color(0xFF30333B);
-  static const yellow = Color(0xFFFFD166);
-  static const ok = Color(0xFF4AF2A1);
-  static const bad = Color(0xFFFF4D6D);
-}
-
-// ===================== BLE GATT UUIDs (ustal i trzymaj stałe) =====================
-const String kSvc = '12345678-1234-5678-1234-56789abcdef0';
-const String kMode = '12345678-1234-5678-1234-56789abcdef1';
-const String kEffect = '12345678-1234-5678-1234-56789abcdef2';
-const String kBrightness = '12345678-1234-5678-1234-56789abcdef3';
-const String kIntensity = '12345678-1234-5678-1234-56789abcdef4';
-const String kGain = '12345678-1234-5678-1234-56789abcdef5';
-const String kSmoothing = '12345678-1234-5678-1234-56789abcdef6';
-const String kPassthrough = '12345678-1234-5678-1234-56789abcdef7';
-const String kStateNotify = '12345678-1234-5678-1234-56789abcdef8';
-
-// Device advertising name (ustal w Pi BLE server)
-const String kDeviceName = 'Visualizer';
+// ===================== Permissions =====================
 
 class PermissionGate extends StatefulWidget {
   const PermissionGate({super.key});
@@ -82,11 +81,10 @@ class _PermissionGateState extends State<PermissionGate> {
 
   Future<bool> _hasBlePerms() async {
     if (!Platform.isAndroid) return true;
-
+    // Android 12+: scan/connect, <12: location bywa wymagane
     final scan = await Permission.bluetoothScan.isGranted;
     final conn = await Permission.bluetoothConnect.isGranted;
     if (scan && conn) return true;
-
     final loc = await Permission.location.isGranted;
     return loc;
   }
@@ -103,24 +101,19 @@ class _PermissionGateState extends State<PermissionGate> {
       Permission.location,
     ].request();
 
-    final granted = results.values.any((r) => r.isGranted);
-    setState(() => _ok = granted);
-  }
-
-  Widget _panel({required Widget child, double cut = 14}) {
-    return CutPanel(cut: cut, child: child);
+    setState(() => _ok = results.values.any((r) => r.isGranted));
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_ok) return const RootBle();
+    if (_ok) return const Root();
 
     return Scaffold(
       backgroundColor: Retro.bg,
       body: Center(
         child: Padding(
           padding: const EdgeInsets.all(18),
-          child: _panel(
+          child: CutPanel(
             cut: 16,
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -130,8 +123,7 @@ class _PermissionGateState extends State<PermissionGate> {
                 const Text('BLUETOOTH REQUIRED', style: TextStyle(fontSize: 26, letterSpacing: 2)),
                 const SizedBox(height: 10),
                 const Text(
-                  'Connect to your Visualizer and control effects.\n\n'
-                  'If you deny permission, the app cannot work.',
+                  'App needs Bluetooth permissions to control your Visualizer (RPi).',
                   textAlign: TextAlign.center,
                   style: TextStyle(fontSize: 18, color: Colors.white70),
                 ),
@@ -159,157 +151,219 @@ class _PermissionGateState extends State<PermissionGate> {
   }
 }
 
-// ===================== BLE State =====================
+// ===================== Data model =====================
 
-class BleState {
-  final String mode;
+class VizState {
+  final String mode; // mic | bt
   final String effect;
   final double brightness;
   final double intensity;
   final double gain;
   final double smoothing;
-  final bool passthrough;
-  final Map<String, dynamic> nowPlaying;
 
-  const BleState({
+  const VizState({
     required this.mode,
     required this.effect,
     required this.brightness,
     required this.intensity,
     required this.gain,
     required this.smoothing,
-    required this.passthrough,
-    required this.nowPlaying,
   });
 
-  factory BleState.empty() => const BleState(
+  factory VizState.initial() => const VizState(
         mode: 'mic',
         effect: 'bars',
         brightness: 0.55,
         intensity: 0.75,
         gain: 1.0,
         smoothing: 0.65,
-        passthrough: true,
-        nowPlaying: {},
       );
 
-  factory BleState.fromJson(Map<String, dynamic> j) {
-    final np = (j['nowplaying'] is Map) ? Map<String, dynamic>.from(j['nowplaying']) : <String, dynamic>{};
-    return BleState(
-      mode: (j['mode'] ?? 'mic').toString(),
-      effect: (j['effect'] ?? 'bars').toString(),
-      brightness: _d(j['brightness'], 0.55),
-      intensity: _d(j['intensity'], 0.75),
-      gain: _d(j['gain'], 1.0),
-      smoothing: _d(j['smoothing'], 0.65),
-      passthrough: (j['passthrough'] ?? true) == true,
-      nowPlaying: np,
+  VizState copyWith({
+    String? mode,
+    String? effect,
+    double? brightness,
+    double? intensity,
+    double? gain,
+    double? smoothing,
+  }) {
+    return VizState(
+      mode: mode ?? this.mode,
+      effect: effect ?? this.effect,
+      brightness: brightness ?? this.brightness,
+      intensity: intensity ?? this.intensity,
+      gain: gain ?? this.gain,
+      smoothing: smoothing ?? this.smoothing,
     );
   }
 
-  static double _d(dynamic v, double fb) {
-    if (v == null) return fb;
-    if (v is num) return v.toDouble();
-    return double.tryParse(v.toString()) ?? fb;
+  Map<String, dynamic> toJson() => {
+        'mode': mode,
+        'effect': effect,
+        'brightness': brightness,
+        'intensity': intensity,
+        'gain': gain,
+        'smoothing': smoothing,
+      };
+
+  static VizState fromJson(Map<String, dynamic> j, {VizState? fallback}) {
+    final fb = fallback ?? VizState.initial();
+    double d(dynamic v, double def) {
+      if (v == null) return def;
+      if (v is num) return v.toDouble();
+      return double.tryParse(v.toString()) ?? def;
+    }
+
+    return VizState(
+      mode: (j['mode'] ?? fb.mode).toString(),
+      effect: (j['effect'] ?? fb.effect).toString(),
+      brightness: d(j['brightness'], fb.brightness).clamp(0.0, 1.0),
+      intensity: d(j['intensity'], fb.intensity).clamp(0.0, 1.0),
+      gain: d(j['gain'], fb.gain).clamp(0.1, 6.0),
+      smoothing: d(j['smoothing'], fb.smoothing).clamp(0.0, 0.95),
+    );
   }
 }
 
-// ===================== BLE Controller =====================
+// ===================== BLE Controller (throttled scan, one cmd char) =====================
+
+enum ConnStatus { idle, scanning, connecting, connected, error }
 
 class BleController {
   BluetoothDevice? device;
-
-  BluetoothCharacteristic? chMode;
-  BluetoothCharacteristic? chEffect;
-  BluetoothCharacteristic? chBrightness;
-  BluetoothCharacteristic? chIntensity;
-  BluetoothCharacteristic? chGain;
-  BluetoothCharacteristic? chSmoothing;
-  BluetoothCharacteristic? chPassthrough;
-  BluetoothCharacteristic? chNotify;
+  BluetoothCharacteristic? chCmd;
+  BluetoothCharacteristic? chState;
 
   StreamSubscription? _scanSub;
   StreamSubscription? _connSub;
   StreamSubscription? _notifySub;
 
-  final ValueNotifier<bool> connected = ValueNotifier(false);
+  final ValueNotifier<ConnStatus> status = ValueNotifier(ConnStatus.idle);
   final ValueNotifier<String?> error = ValueNotifier(null);
-  final ValueNotifier<BleState> state = ValueNotifier(BleState.empty());
 
-  Future<void> startScanAndConnect({Duration timeout = const Duration(seconds: 6)}) async {
+  // stan UI (lokalny) + stan z Pi (opcjonalnie)
+  final ValueNotifier<VizState> desired = ValueNotifier(VizState.initial());
+  final ValueNotifier<VizState> remote = ValueNotifier(VizState.initial());
+
+  DateTime _lastScanAt = DateTime.fromMillisecondsSinceEpoch(0);
+  bool _scanInFlight = false;
+
+  Future<void> scanAndConnect({Duration timeout = const Duration(seconds: 6)}) async {
+    if (_scanInFlight) return;
+
+    // throttle: nie częściej niż co 2 sek
+    final now = DateTime.now();
+    if (now.difference(_lastScanAt) < const Duration(seconds: 2)) return;
+    _lastScanAt = now;
+
     error.value = null;
+    status.value = ConnStatus.scanning;
+    _scanInFlight = true;
 
     try {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
 
+    // skan 1x, koniec
     await FlutterBluePlus.startScan(timeout: timeout);
 
     _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) async {
       for (final r in results) {
         final name = r.device.platformName;
-        if (name == kDeviceName) {
-          await FlutterBluePlus.stopScan();
+        final matchesName = name == kDeviceName;
+
+        // Alternatywa: filtrowanie po service UUID (jeśli nazwa bywa pusta)
+        final advUuids = r.advertisementData.serviceUuids.map((e) => e.toLowerCase()).toList();
+        final matchesSvc = advUuids.contains(kSvc.toLowerCase());
+
+        if (matchesName || matchesSvc) {
+          try {
+            await FlutterBluePlus.stopScan();
+          } catch (_) {}
           await _connect(r.device);
           return;
         }
       }
     });
+
+    // po timeout skanu, jeśli nie znaleziono:
+    Future.delayed(timeout + const Duration(milliseconds: 200), () {
+      if (status.value == ConnStatus.scanning) {
+        status.value = ConnStatus.error;
+        error.value = 'Visualizer not found';
+      }
+      _scanInFlight = false;
+    });
   }
 
   Future<void> _connect(BluetoothDevice d) async {
+    status.value = ConnStatus.connecting;
     device = d;
     error.value = null;
 
     try {
-      await d.connect(autoConnect: true, timeout: const Duration(seconds: 8));
-    } catch (_) {}
+      await d.connect(autoConnect: false, timeout: const Duration(seconds: 8));
+    } catch (_) {
+      // jeśli już połączony / race, spróbujemy i tak discover
+    }
 
     _connSub?.cancel();
     _connSub = d.connectionState.listen((s) {
-      connected.value = (s == BluetoothConnectionState.connected);
-      if (!connected.value) error.value ??= 'Disconnected';
+      final ok = (s == BluetoothConnectionState.connected);
+      if (!ok) {
+        status.value = ConnStatus.error;
+        error.value ??= 'Disconnected';
+      }
     });
 
-    await _discoverChars(d);
-    await _enableNotify();
-    connected.value = true;
+    try {
+      await _discover(d);
+      await _enableNotifyIfPresent();
+      status.value = ConnStatus.connected;
+
+      // po połączeniu: wyślij pełny stan "desired" jako init
+      await sendFullState(desired.value);
+    } catch (e) {
+      status.value = ConnStatus.error;
+      error.value = 'BLE init failed: $e';
+    } finally {
+      _scanInFlight = false;
+    }
   }
 
-  Future<void> _discoverChars(BluetoothDevice d) async {
+  Future<void> _discover(BluetoothDevice d) async {
     final services = await d.discoverServices();
-    final svc = services.where((s) => s.uuid.toString().toLowerCase() == kSvc).toList();
-    if (svc.isEmpty) throw Exception('GATT service not found');
+    final svc = services.where((s) => s.uuid.toString().toLowerCase() == kSvc.toLowerCase()).toList();
+    if (svc.isEmpty) throw Exception('GATT service not found ($kSvc)');
     final s = svc.first;
 
     BluetoothCharacteristic? pick(String uuid) {
-      return s.characteristics.where((c) => c.uuid.toString().toLowerCase() == uuid).firstOrNull;
+      final u = uuid.toLowerCase();
+      for (final c in s.characteristics) {
+        if (c.uuid.toString().toLowerCase() == u) return c;
+      }
+      return null;
     }
 
-    chMode = pick(kMode);
-    chEffect = pick(kEffect);
-    chBrightness = pick(kBrightness);
-    chIntensity = pick(kIntensity);
-    chGain = pick(kGain);
-    chSmoothing = pick(kSmoothing);
-    chPassthrough = pick(kPassthrough);
-    chNotify = pick(kStateNotify);
+    chCmd = pick(kCmd);
+    chState = pick(kState);
 
-    if (chNotify == null) throw Exception('Notify characteristic missing');
+    if (chCmd == null) throw Exception('CMD characteristic missing ($kCmd)');
   }
 
-  Future<void> _enableNotify() async {
-    final ch = chNotify!;
-    await ch.setNotifyValue(true);
+  Future<void> _enableNotifyIfPresent() async {
+    final ch = chState;
+    if (ch == null) return;
 
+    await ch.setNotifyValue(true);
     _notifySub?.cancel();
     _notifySub = ch.lastValueStream.listen((bytes) {
       try {
-        final text = utf8.decode(bytes);
-        final j = jsonDecode(text);
+        final txt = utf8.decode(bytes);
+        final j = jsonDecode(txt);
         if (j is Map<String, dynamic>) {
-          state.value = BleState.fromJson(j);
+          remote.value = VizState.fromJson(j, fallback: remote.value);
         }
       } catch (_) {}
     });
@@ -327,49 +381,55 @@ class BleController {
     _notifySub = null;
     _connSub = null;
 
-    if (device != null) {
+    final d = device;
+    device = null;
+    chCmd = null;
+    chState = null;
+
+    if (d != null) {
       try {
-        await device!.disconnect();
+        await d.disconnect();
       } catch (_) {}
     }
-    connected.value = false;
+
+    status.value = ConnStatus.idle;
+    error.value = null;
+    _scanInFlight = false;
   }
 
-  Future<void> writeString(BluetoothCharacteristic? ch, String v) async {
+  Future<void> sendPatch(Map<String, dynamic> patch) async {
+    final ch = chCmd;
     if (ch == null) return;
-    await ch.write(utf8.encode(v), withoutResponse: true);
+
+    final payload = utf8.encode(jsonEncode(patch));
+
+    // prefer withoutResponse jeśli charakterystyka to wspiera (mniej lag)
+    final canNoResp = ch.properties.writeWithoutResponse;
+    await ch.write(payload, withoutResponse: canNoResp);
   }
 
-  Future<void> setMode(String v) => writeString(chMode, v);
-  Future<void> setEffect(String v) => writeString(chEffect, v);
-  Future<void> setBrightness(double v) => writeString(chBrightness, v.toStringAsFixed(3));
-  Future<void> setIntensity(double v) => writeString(chIntensity, v.toStringAsFixed(3));
-  Future<void> setGain(double v) => writeString(chGain, v.toStringAsFixed(3));
-  Future<void> setSmoothing(double v) => writeString(chSmoothing, v.toStringAsFixed(3));
-  Future<void> setPassthrough(bool v) => writeString(chPassthrough, v ? '1' : '0');
+  Future<void> sendFullState(VizState s) async {
+    await sendPatch(s.toJson());
+  }
 }
 
-extension _FirstOrNull<E> on Iterable<E> {
-  E? get firstOrNull => isEmpty ? null : first;
-}
+// ===================== UI =====================
 
-// ===================== Root UI (no rounded borders) =====================
-
-class RootBle extends StatefulWidget {
-  const RootBle({super.key});
+class Root extends StatefulWidget {
+  const Root({super.key});
   @override
-  State<RootBle> createState() => _RootBleState();
+  State<Root> createState() => _RootState();
 }
 
-class _RootBleState extends State<RootBle> {
+class _RootState extends State<Root> {
   final BleController ble = BleController();
-  int _tab = 0;
   Timer? _debounce;
 
   @override
   void initState() {
     super.initState();
-    ble.startScanAndConnect();
+    // autoconnect raz po starcie (bez pętli)
+    ble.scanAndConnect();
   }
 
   @override
@@ -379,12 +439,10 @@ class _RootBleState extends State<RootBle> {
     super.dispose();
   }
 
-  void _setDebounced(VoidCallback f) {
+  void _debounced(Duration d, VoidCallback f) {
     _debounce?.cancel();
-    _debounce = Timer(const Duration(milliseconds: 120), f);
+    _debounce = Timer(d, f);
   }
-
-  Widget _panel({required Widget child, double cut = 12}) => CutPanel(cut: cut, child: child);
 
   Widget _plate(String t, {Color accent = Retro.yellow}) {
     return Container(
@@ -396,6 +454,23 @@ class _RootBleState extends State<RootBle> {
       child: Text(
         t.toUpperCase(),
         style: TextStyle(color: accent, letterSpacing: 2, fontSize: 14),
+        overflow: TextOverflow.ellipsis,
+      ),
+    );
+  }
+
+  Widget _btn(String text, {required VoidCallback? onPressed, Color fg = Retro.yellow, Color border = Retro.yellow}) {
+    return SizedBox(
+      height: 46,
+      child: ElevatedButton(
+        onPressed: onPressed,
+        style: ElevatedButton.styleFrom(
+          backgroundColor: Colors.black.withOpacity(0.25),
+          foregroundColor: fg,
+          shape: const BeveledRectangleBorder(),
+          side: BorderSide(color: border.withOpacity(0.65), width: 2),
+        ),
+        child: Text(text, style: const TextStyle(letterSpacing: 2, fontSize: 18)),
       ),
     );
   }
@@ -426,283 +501,200 @@ class _RootBleState extends State<RootBle> {
     );
   }
 
-  Widget _topOsd(BleState s, bool connected) {
-    final c = connected ? Retro.ok : Retro.bad;
-    final label = connected ? 'OK' : 'NO LINK';
-
-    return CutPanel(
-      cut: 10,
-      child: Row(
-        children: [
-          Container(width: 10, height: 10, decoration: BoxDecoration(color: c, shape: BoxShape.rectangle)),
-          const SizedBox(width: 10),
-          const Text('VISUALIZER', style: TextStyle(fontSize: 20, letterSpacing: 2)),
-          const Spacer(),
-          _plate('LINK: $label', accent: c),
-          const SizedBox(width: 8),
-          _plate('MODE: ${s.mode}', accent: Retro.yellow),
-          const SizedBox(width: 8),
-          _plate('FX: ${s.effect}', accent: Retro.yellow),
-        ],
-      ),
-    );
-  }
-
-  Widget _home(BleState s, bool connected, String? err) {
-    final np = s.nowPlaying;
-    final source = (np['source'] ?? s.mode).toString();
-    final title = (np['title'] ?? '').toString().trim();
-    final artist = (np['artist'] ?? '').toString().trim();
-    final album = (np['album'] ?? '').toString().trim();
-
-    final line = (artist.isNotEmpty && title.isNotEmpty) ? '$artist — $title' : (title.isNotEmpty ? title : artist);
-
-    return Column(
-      children: [
-        _topOsd(s, connected),
-        const SizedBox(height: 12),
-        _panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('NOW PLAYING', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-              const SizedBox(height: 10),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  _plate('SRC: $source', accent: Retro.yellow),
-                  if (connected) _plate('CONNECTED', accent: Retro.ok) else _plate('DISCONNECTED', accent: Retro.bad),
-                ],
-              ),
-              const SizedBox(height: 10),
-              Text(line.isNotEmpty ? line : '—', style: const TextStyle(fontSize: 22)),
-              if (album.isNotEmpty) Text(album, style: const TextStyle(color: Colors.white60, fontSize: 18)),
-              if (err != null) ...[
-                const SizedBox(height: 8),
-                Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 16)),
-              ],
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        _panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('QUICK', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-              const SizedBox(height: 10),
-              Row(
-                children: [
-                  Expanded(
-                    child: SizedBox(
-                      height: 46,
-                      child: ElevatedButton(
-                        onPressed: () => ble.startScanAndConnect(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.black.withOpacity(0.25),
-                          foregroundColor: Retro.yellow,
-                          shape: const BeveledRectangleBorder(),
-                          side: BorderSide(color: Retro.yellow.withOpacity(0.65), width: 2),
-                        ),
-                        child: const Text('FIND', style: TextStyle(letterSpacing: 2, fontSize: 18)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: SizedBox(
-                      height: 46,
-                      child: ElevatedButton(
-                        onPressed: () => ble.disconnect(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.black.withOpacity(0.25),
-                          foregroundColor: Colors.white70,
-                          shape: const BeveledRectangleBorder(),
-                          side: BorderSide(color: Colors.white24, width: 2),
-                        ),
-                        child: const Text('DISCONNECT', style: TextStyle(letterSpacing: 2, fontSize: 18)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _controls(BleState s) {
-    return Column(
-      children: [
-        _panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('MODE', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-              const SizedBox(height: 10),
-              SegmentedButton<String>(
-                segments: const [
-                  ButtonSegment(value: 'mic', label: Text('MIC')),
-                  ButtonSegment(value: 'bluetooth', label: Text('BT')),
-                  ButtonSegment(value: 'local', label: Text('LOCAL')),
-                ],
-                selected: {s.mode},
-                onSelectionChanged: (set) async => ble.setMode(set.first),
-              ),
-              const SizedBox(height: 10),
-              SwitchListTile(
-                contentPadding: EdgeInsets.zero,
-                title: const Text('Mic passthrough'),
-                subtitle: const Text('mic → speaker (only MIC mode)'),
-                value: s.passthrough,
-                onChanged: (v) async => ble.setPassthrough(v),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        _panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('EFFECT', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-              const SizedBox(height: 10),
-              DropdownButtonFormField<String>(
-                value: s.effect,
-                items: const [
-                  DropdownMenuItem(value: 'bars', child: Text('BARS')),
-                  DropdownMenuItem(value: 'vu', child: Text('VU')),
-                  DropdownMenuItem(value: 'scope', child: Text('SCOPE')),
-                  DropdownMenuItem(value: 'radial', child: Text('RADIAL')),
-                  DropdownMenuItem(value: 'fire', child: Text('FIRE')),
-                  DropdownMenuItem(value: 'wave', child: Text('WAVE')),
-                ],
-                onChanged: (v) async {
-                  if (v == null) return;
-                  await ble.setEffect(v);
-                },
-                decoration: const InputDecoration(border: OutlineInputBorder()),
-              ),
-            ],
-          ),
-        ),
-        const SizedBox(height: 12),
-        _panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('LEVELS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-              const SizedBox(height: 10),
-              _slider('Intensity', s.intensity, 0, 1, (v) => _setDebounced(() => ble.setIntensity(v))),
-              _slider('Brightness', s.brightness, 0, 1, (v) => _setDebounced(() => ble.setBrightness(v))),
-              _slider('Gain', s.gain, 0.1, 6, (v) => _setDebounced(() => ble.setGain(v))),
-              _slider('Smoothing', s.smoothing, 0, 0.95, (v) => _setDebounced(() => ble.setSmoothing(v))),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _device(bool connected, String? err) {
-    return Column(
-      children: [
-        _panel(
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Text('DEVICE', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-              const SizedBox(height: 10),
-              Text(
-                connected ? 'Connected to $kDeviceName.' : 'Searching for $kDeviceName…',
-                style: const TextStyle(color: Colors.white70, fontSize: 18),
-              ),
-              if (err != null) ...[
-                const SizedBox(height: 8),
-                Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 16)),
-              ],
-              const SizedBox(height: 12),
-              Row(
-                children: [
-                  Expanded(
-                    child: SizedBox(
-                      height: 46,
-                      child: ElevatedButton(
-                        onPressed: () => ble.startScanAndConnect(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.black.withOpacity(0.25),
-                          foregroundColor: Retro.yellow,
-                          shape: const BeveledRectangleBorder(),
-                          side: BorderSide(color: Retro.yellow.withOpacity(0.65), width: 2),
-                        ),
-                        child: const Text('FIND', style: TextStyle(letterSpacing: 2, fontSize: 18)),
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 10),
-                  Expanded(
-                    child: SizedBox(
-                      height: 46,
-                      child: ElevatedButton(
-                        onPressed: () => ble.disconnect(),
-                        style: ElevatedButton.styleFrom(
-                          backgroundColor: Colors.black.withOpacity(0.25),
-                          foregroundColor: Colors.white70,
-                          shape: const BeveledRectangleBorder(),
-                          side: BorderSide(color: Colors.white24, width: 2),
-                        ),
-                        child: const Text('DISCONNECT', style: TextStyle(letterSpacing: 2, fontSize: 18)),
-                      ),
-                    ),
-                  ),
-                ],
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
-    return ValueListenableBuilder<bool>(
-      valueListenable: ble.connected,
-      builder: (context, connected, _) {
+    return ValueListenableBuilder<ConnStatus>(
+      valueListenable: ble.status,
+      builder: (context, st, _) {
         return ValueListenableBuilder<String?>(
           valueListenable: ble.error,
           builder: (context, err, __) {
-            return ValueListenableBuilder<BleState>(
-              valueListenable: ble.state,
-              builder: (context, s, ___) {
-                final pages = <Widget>[
-                  _home(s, connected, err),
-                  _controls(s),
-                  _device(connected, err),
-                ];
+            return ValueListenableBuilder<VizState>(
+              valueListenable: ble.desired,
+              builder: (context, desired, ___) {
+                return ValueListenableBuilder<VizState>(
+                  valueListenable: ble.remote,
+                  builder: (context, remote, ____) {
+                    final connected = st == ConnStatus.connected;
+                    final statusColor = connected ? Retro.ok : (st == ConnStatus.error ? Retro.bad : Retro.yellow);
+                    final statusText = switch (st) {
+                      ConnStatus.idle => 'IDLE',
+                      ConnStatus.scanning => 'SCANNING',
+                      ConnStatus.connecting => 'CONNECTING',
+                      ConnStatus.connected => 'CONNECTED',
+                      ConnStatus.error => 'ERROR',
+                    };
 
-                return Scaffold(
-                  backgroundColor: Retro.bg,
-                  appBar: AppBar(
-                    title: const Text('VISUALIZER'),
-                    backgroundColor: Retro.panel,
-                  ),
-                  body: ListView(
-                    padding: const EdgeInsets.all(12),
-                    children: [pages[_tab]],
-                  ),
-                  bottomNavigationBar: NavigationBar(
-                    selectedIndex: _tab,
-                    onDestinationSelected: (i) => setState(() => _tab = i),
-                    destinations: const [
-                      NavigationDestination(icon: Icon(Icons.home), label: 'Home'),
-                      NavigationDestination(icon: Icon(Icons.tune), label: 'Controls'),
-                      NavigationDestination(icon: Icon(Icons.memory), label: 'Device'),
-                    ],
-                  ),
+                    // jeśli Pi wysyła state notify, pokaż remote. Jak nie, i tak UI działa jako "desired".
+                    final showState = remote;
+
+                    return Scaffold(
+                      appBar: AppBar(
+                        title: const Text('VISUALIZER'),
+                        backgroundColor: Retro.panel,
+                      ),
+                      body: ListView(
+                        padding: const EdgeInsets.all(12),
+                        children: [
+                          CutPanel(
+                            cut: 10,
+                            child: Row(
+                              children: [
+                                Container(width: 10, height: 10, color: statusColor),
+                                const SizedBox(width: 10),
+                                Expanded(
+                                  child: _plate('LINK: $statusText', accent: statusColor),
+                                ),
+                                const SizedBox(width: 8),
+                                Expanded(child: _plate('MODE: ${showState.mode}', accent: Retro.yellow)),
+                                const SizedBox(width: 8),
+                                Expanded(child: _plate('FX: ${showState.effect}', accent: Retro.yellow)),
+                              ],
+                            ),
+                          ),
+
+                          if (err != null) ...[
+                            const SizedBox(height: 10),
+                            CutPanel(
+                              cut: 10,
+                              child: Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 18)),
+                            ),
+                          ],
+
+                          const SizedBox(height: 12),
+
+                          CutPanel(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('CONNECTION', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                                const SizedBox(height: 10),
+                                Row(
+                                  children: [
+                                    Expanded(
+                                      child: _btn(
+                                        st == ConnStatus.scanning ? 'SCANNING…' : 'CONNECT',
+                                        onPressed: (st == ConnStatus.scanning || st == ConnStatus.connecting)
+                                            ? null
+                                            : () => ble.scanAndConnect(),
+                                        fg: Retro.yellow,
+                                        border: Retro.yellow,
+                                      ),
+                                    ),
+                                    const SizedBox(width: 10),
+                                    Expanded(
+                                      child: _btn(
+                                        'DISCONNECT',
+                                        onPressed: connected ? () => ble.disconnect() : null,
+                                        fg: Colors.white70,
+                                        border: Colors.white24,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ],
+                            ),
+                          ),
+
+                          const SizedBox(height: 12),
+
+                          CutPanel(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('MODE', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                                const SizedBox(height: 10),
+
+                                SegmentedButton<String>(
+                                  segments: const [
+                                    ButtonSegment(value: 'mic', label: Text('MIC')),
+                                    ButtonSegment(value: 'bt', label: Text('BT')),
+                                  ],
+                                  selected: {desired.mode},
+                                  onSelectionChanged: (set) async {
+                                    final m = set.first;
+                                    final next = desired.copyWith(mode: m);
+                                    ble.desired.value = next;
+
+                                    if (connected) {
+                                      await ble.sendPatch({'mode': m});
+                                    }
+                                  },
+                                ),
+
+                                const SizedBox(height: 12),
+
+                                Text('EFFECT', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                                const SizedBox(height: 10),
+                                DropdownButtonFormField<String>(
+                                  value: desired.effect,
+                                  items: const [
+                                    DropdownMenuItem(value: 'bars', child: Text('BARS')),
+                                    DropdownMenuItem(value: 'vu', child: Text('VU')),
+                                    DropdownMenuItem(value: 'scope', child: Text('SCOPE')),
+                                    DropdownMenuItem(value: 'radial', child: Text('RADIAL')),
+                                    DropdownMenuItem(value: 'fire', child: Text('FIRE')),
+                                    DropdownMenuItem(value: 'wave', child: Text('WAVE')),
+                                  ],
+                                  onChanged: (v) async {
+                                    if (v == null) return;
+                                    final next = desired.copyWith(effect: v);
+                                    ble.desired.value = next;
+
+                                    if (connected) {
+                                      await ble.sendPatch({'effect': v});
+                                    }
+                                  },
+                                  decoration: const InputDecoration(border: OutlineInputBorder()),
+                                ),
+
+                                const SizedBox(height: 12),
+
+                                Text('LEVELS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                                const SizedBox(height: 10),
+
+                                _slider('Intensity', desired.intensity, 0, 1, (v) {
+                                  ble.desired.value = desired.copyWith(intensity: v);
+                                  _debounced(const Duration(milliseconds: 120), () {
+                                    if (connected) ble.sendPatch({'intensity': v});
+                                  });
+                                }),
+
+                                _slider('Brightness', desired.brightness, 0, 1, (v) {
+                                  ble.desired.value = desired.copyWith(brightness: v);
+                                  _debounced(const Duration(milliseconds: 120), () {
+                                    if (connected) ble.sendPatch({'brightness': v});
+                                  });
+                                }),
+
+                                _slider('Gain', desired.gain, 0.1, 6, (v) {
+                                  ble.desired.value = desired.copyWith(gain: v);
+                                  _debounced(const Duration(milliseconds: 120), () {
+                                    if (connected) ble.sendPatch({'gain': v});
+                                  });
+                                }),
+
+                                _slider('Smoothing', desired.smoothing, 0, 0.95, (v) {
+                                  ble.desired.value = desired.copyWith(smoothing: v);
+                                  _debounced(const Duration(milliseconds: 120), () {
+                                    if (connected) ble.sendPatch({'smoothing': v});
+                                  });
+                                }),
+
+                                const SizedBox(height: 6),
+                                Text(
+                                  connected
+                                      ? 'Sending patches as JSON to CMD characteristic.'
+                                      : 'Not connected. Controls update local state only.',
+                                  style: const TextStyle(color: Colors.white60, fontSize: 16),
+                                ),
+                              ],
+                            ),
+                          ),
+                        ],
+                      ),
+                    );
+                  },
                 );
               },
             );
@@ -728,9 +720,7 @@ class CutPanel extends StatelessWidget {
         decoration: BoxDecoration(
           color: Retro.panel,
           border: Border.all(color: Retro.edge, width: 2),
-          boxShadow: const [
-            BoxShadow(blurRadius: 0, offset: Offset(6, 6), color: Colors.black54),
-          ],
+          boxShadow: const [BoxShadow(blurRadius: 0, offset: Offset(6, 6), color: Colors.black54)],
         ),
         child: Stack(
           children: [
@@ -782,8 +772,6 @@ class _BevelPainter extends CustomPainter {
   @override
   bool shouldRepaint(covariant CustomPainter oldDelegate) => false;
 }
-
-// ===================== Rectangular thumb (kills Material look) =====================
 
 class RectThumbShape extends SliderComponentShape {
   final double w, h;

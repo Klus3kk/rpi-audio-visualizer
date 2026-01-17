@@ -24,7 +24,7 @@ def apply_brightness(frame, brightness):
     return out
 
 class LedEngine:
-    def __init__(self, state, audio_engine, fps=50):
+    def __init__(self, state, audio_engine, fps=15):
         self.state = state
         self.audio = audio_engine
         self.fps = int(fps)

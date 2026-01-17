@@ -15,8 +15,7 @@ def pick_input_device(prefer_substrings):
     return None
 
 def input_for_mode(mode: str):
-    if mode == "bluetooth":
-        # PulseAudio monitor źródła BT
+    if mode == "bt":
         return pick_input_device(["monitor", "bluez"])
     if mode == "mic":
         return pick_input_device(["usb", "mic", "quadcast", "hyperx"])
