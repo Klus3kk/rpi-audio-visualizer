@@ -9,7 +9,7 @@ def clamp8(v):
     if v > 255: return 255
     return int(v)
 
-def apply_power_limit(frame, limit=0.55):
+def apply_power_limit(frame, limit=0.35):
     if limit >= 1.0:
         return frame
     out = []
@@ -25,7 +25,7 @@ def main():
 
     cap = AlsaCapture(samplerate=sr, blocksize=block, channels=1, device=None).start()
     fx = FeatureExtractor(samplerate=sr, nfft=block, bands=16)
-    bars = BarsEffect(w=16, h=16)
+    bars = BarsEffect(w=16, h=16) # visuals testing
 
     last = time.perf_counter()
     try:
@@ -37,7 +37,7 @@ def main():
 
             features = fx.compute(x)
             frame = bars.update(features, dt)
-            frame = apply_power_limit(frame, limit=0.55)
+            frame = apply_power_limit(frame, limit=0.35)
 
             for i, (r, g, b) in enumerate(frame):
                 leds.set_pixel(i, (r, g, b))
