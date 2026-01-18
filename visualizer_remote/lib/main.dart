@@ -679,6 +679,26 @@ class _RootState extends State<Root> {
                           ],
                         ),
                       ),
+                      CutPanel(
+                        child: ValueListenableBuilder<VizState>(
+                          valueListenable: ble.remote,
+                          builder: (context, remote, _) {
+                            final a = remote.artist.isEmpty ? desired.artist : remote.artist;
+                            final t = remote.title.isEmpty ? desired.title : remote.title;
+
+                            return Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text('NOW PLAYING', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                                const SizedBox(height: 10),
+                                Text('ARTIST: ${a.isEmpty ? "-" : a}', style: const TextStyle(fontSize: 18)),
+                                const SizedBox(height: 6),
+                                Text('TITLE:  ${t.isEmpty ? "-" : t}', style: const TextStyle(fontSize: 18)),
+                              ],
+                            );
+                          },
+                        ),
+                      ),
                     ],
                   ),
                 );

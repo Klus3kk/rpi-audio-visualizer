@@ -174,7 +174,8 @@ class AudioHub:
         self.nfft = int(nfft)
 
         self._lock = threading.Lock()
-        self._latest = np.zeros(self.nfft, dtype=np.float32)
+        self._mic_latest = np.zeros(self.nfft, dtype=np.float32)
+        self._bt_latest = np.zeros(self.nfft, dtype=np.float32)
 
         self._mic: sd.InputStream | None = None
         self._bt: BlueAlsaInput | None = None
@@ -192,7 +193,7 @@ class AudioHub:
                     pad[: x.shape[0]] = x
                     x = pad
                 with self._lock:
-                    self._latest = x.copy()
+                    self._mic_latest = x.copy()
             except Exception:
                 pass
 
@@ -217,12 +218,15 @@ class AudioHub:
                     x = np.zeros(self.nfft, dtype=np.float32)
             except Exception:
                 x = np.zeros(self.nfft, dtype=np.float32)
+
             with self._lock:
-                self._latest = x.astype(np.float32, copy=False)
+                self._bt_latest = x.astype(np.float32, copy=False)
+
             time.sleep(0.0)
 
     def start_bt(self, bt_addr: str | None):
         self.stop_bt()
+        self._bt_latest[:] = 0.0
         self._bt = BlueAlsaInput(bt_addr=bt_addr, rate=self.sr, channels=2, chunk_frames=self.nfft)
         self._bt.start()
         self._bt_stop.clear()
@@ -238,10 +242,17 @@ class AudioHub:
                 bt.stop()
             except Exception:
                 pass
-
-    def get_latest(self) -> np.ndarray:
         with self._lock:
-            return self._latest.copy()
+            self._bt_latest[:] = 0.0
+
+    def get_latest(self, mode: str) -> np.ndarray:
+        # HARD SEPARATION:
+        # - mic mode -> only mic buffer
+        # - bt mode  -> only bt buffer (if bt silent -> zeros, never mic)
+        with self._lock:
+            if mode == "bt":
+                return self._bt_latest.copy()
+            return self._mic_latest.copy()
 
     def close(self):
         self.stop_bt()
@@ -370,10 +381,9 @@ def main():
                             device_name=str(st.get("device_name", "")),
                             device_addr=str(st.get("device_addr", "")),
                         )
-                        ui.set_track(
-                            artist=str(st.get("artist", "")),
-                            title=str(st.get("title", "")),
-                        )
+                        artist = str(st.get("artist", "") or "")
+                        title  = str(st.get("title", "") or "")
+                        ui.set_track(artist=artist, title=title)
                         ui.set_status(f"bt | gain={params['gain']:.2f}")
                     else:
                         ui.set_status(f"mic | gain={params['gain']:.2f}")
@@ -382,7 +392,7 @@ def main():
                     log_exc("LCDUI.render()", e)
 
             # ----- audio -> features -----
-            x = audio.get_latest()
+            x = audio.get_latest(current_mode)
             x = x - float(np.mean(x))
             x = x * float(params["gain"])
 
