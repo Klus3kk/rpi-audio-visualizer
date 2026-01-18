@@ -52,12 +52,13 @@ def main():
 
     effects = make_effects()
     params = {
-        "intensity": 0.85,
+        "intensity": 0.75,
         "color_mode": "auto",
-        "power": 0.55,
-        "glow": 0.22,
-        "mic_gain": 2.2,   # podbijaj do 3.0 jeśli nadal za cicho
+        "power": 0.55,      # globalnie mniej mocy
+        "glow": 0.18,       # wave
+        "mic_gain": 18.0,   # wave sensitivity
     }
+
 
     i = 0
     name, eff = effects[i]

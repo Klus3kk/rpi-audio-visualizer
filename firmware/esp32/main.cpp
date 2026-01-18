@@ -1,27 +1,28 @@
 #include <Arduino.h>
 #include <FastLED.h>
 
-#define WIDTH 16
-#define HEIGHT 16
-#define NUM_LEDS (WIDTH * HEIGHT)
-
+#define W 16
+#define H 16
+#define NUM_LEDS (W*H)
 #define DATA_PIN 18
-#define LED_TYPE WS2812B
-#define COLOR_ORDER GRB
-#define BRIGHTNESS 4
 
-static const uint32_t SERIAL_BAUD = 115200;   // ważne: ustawimy tak samo na Pi
-static const uint32_t WATCHDOG_MS = 1000;
+// 1) ZMIEJSZ TO:
+#define BRIGHTNESS 2          // 1..4 (spróbuj 1 lub 2)
+
+// 2) LIMIT MOCY (bardzo ważne):
+#define MAX_MILLIAMPS 250     // 150..350 zwykle OK na testy
+
+#define SYNC1 0xAA
+#define SYNC2 0x55
+#define FRAME_LEN (NUM_LEDS*3)
 
 CRGB leds[NUM_LEDS];
+static uint8_t payload[FRAME_LEN];
 
-// serpentine
-static inline uint16_t XY(uint8_t x, uint8_t y) {
-  if ((y & 1) == 0) return (uint16_t)y * WIDTH + x;
-  return (uint16_t)y * WIDTH + (WIDTH - 1 - x);
+inline uint16_t XY(uint8_t x, uint8_t y) {
+  return (y & 1) ? (y*W + (W-1-x)) : (y*W + x);
 }
 
-// CRC8 poly 0x07
 static uint8_t crc8(const uint8_t* data, size_t len) {
   uint8_t crc = 0;
   for (size_t i = 0; i < len; i++) {
@@ -33,106 +34,72 @@ static uint8_t crc8(const uint8_t* data, size_t len) {
   return crc;
 }
 
-enum class RxState { SYNC1, SYNC2, FRAME_ID, LEN1, LEN2, PAYLOAD, CRC };
-static RxState st = RxState::SYNC1;
-
-static uint8_t frameId = 0;
-static uint16_t wantLen = 0;
-static uint16_t got = 0;
-
-static uint8_t payload[NUM_LEDS * 3];
-static uint32_t lastOkFrameMs = 0;
-
-static void applyPayload() {
-  int p = 0;
-  for (int y = 0; y < HEIGHT; y++) {
-    for (int x = 0; x < WIDTH; x++) {
-      uint8_t r = payload[p++];
-      uint8_t g = payload[p++];
-      uint8_t b = payload[p++];
-      leds[XY((uint8_t)x, (uint8_t)y)] = CRGB(r, g, b);
-    }
+static bool read_exact(uint8_t* out, size_t n) {
+  size_t got = 0;
+  while (got < n) {
+    int c = Serial.read();
+    if (c < 0) return false;   // jeszcze nie ma danych -> wróć do loop()
+    out[got++] = (uint8_t)c;
   }
-  FastLED.show();
+  return true;
+}
+
+// skala 0..255 bez floatów
+static inline uint8_t scale8(uint8_t v, uint8_t s) {
+  return (uint16_t(v) * uint16_t(s)) >> 8;
 }
 
 void setup() {
-  Serial.begin(SERIAL_BAUD);
-  delay(150);
+  Serial.begin(115200);
+  delay(50);
 
-  FastLED.addLeds<LED_TYPE, DATA_PIN, COLOR_ORDER>(leds, NUM_LEDS);
+  Serial.setRxBufferSize(4096);
+
+  FastLED.addLeds<WS2812B, DATA_PIN, GRB>(leds, NUM_LEDS);
   FastLED.setBrightness(BRIGHTNESS);
-  FastLED.setMaxPowerInVoltsAndMilliamps(5, 500);
+  FastLED.setMaxPowerInVoltsAndMilliamps(5, MAX_MILLIAMPS);
+
   fill_solid(leds, NUM_LEDS, CRGB::Black);
   FastLED.show();
-
-  // Boot marker: krótkie mignięcie na fiolet
-  fill_solid(leds, NUM_LEDS, CRGB(80, 0, 120));
-  FastLED.show();
-  delay(150);
-  fill_solid(leds, NUM_LEDS, CRGB::Black);
-  FastLED.show();
-
-  lastOkFrameMs = millis();
 }
 
 void loop() {
-  // watchdog: jeśli brak poprawnych ramek -> gaś
-  if (millis() - lastOkFrameMs > WATCHDOG_MS) {
-    fill_solid(leds, NUM_LEDS, CRGB::Black);
-    FastLED.show();
-  }
-
   while (Serial.available() > 0) {
-    uint8_t b = (uint8_t)Serial.read();
+    int b = Serial.read();
+    if (b != SYNC1) continue;
 
-    switch (st) {
-      case RxState::SYNC1:
-        if (b == 0xAA) st = RxState::SYNC2;
-        break;
+    uint8_t b2;
+    if (!read_exact(&b2, 1)) return;
+    if (b2 != SYNC2) continue;
 
-      case RxState::SYNC2:
-        if (b == 0x55) {
-          st = RxState::FRAME_ID;
-        } else {
-          st = RxState::SYNC1;
-        }
-        break;
+    // frame_id (ignorujemy)
+    uint8_t fid;
+    if (!read_exact(&fid, 1)) return;
 
-      case RxState::FRAME_ID:
-        frameId = b;
-        st = RxState::LEN1;
-        break;
+    // len lo/hi
+    uint8_t l0, l1;
+    if (!read_exact(&l0, 1)) return;
+    if (!read_exact(&l1, 1)) return;
 
-      case RxState::LEN1:
-        wantLen = b;
-        st = RxState::LEN2;
-        break;
+    uint16_t wantLen = (uint16_t)l0 | ((uint16_t)l1 << 8);
+    if (wantLen != FRAME_LEN) continue;
 
-      case RxState::LEN2:
-        wantLen |= ((uint16_t)b << 8);
-        if (wantLen != (NUM_LEDS * 3)) {
-          st = RxState::SYNC1;
-        } else {
-          got = 0;
-          st = RxState::PAYLOAD;
-        }
-        break;
+    if (!read_exact(payload, FRAME_LEN)) return;
 
-      case RxState::PAYLOAD:
-        payload[got++] = b;
-        if (got >= wantLen) st = RxState::CRC;
-        break;
+    uint8_t recvCrc;
+    if (!read_exact(&recvCrc, 1)) return;
+    if (recvCrc != crc8(payload, FRAME_LEN)) continue;
 
-      case RxState::CRC: {
-        uint8_t recv = b;
-        uint8_t calc = crc8(payload, wantLen);
-        if (recv == calc) {
-          applyPayload();
-          lastOkFrameMs = millis();
-        }
-        st = RxState::SYNC1;
-      } break;
+    int p = 0;
+    for (uint8_t y = 0; y < H; y++) {
+      for (uint8_t x = 0; x < W; x++) {
+        uint8_t r = payload[p++];
+        uint8_t g = payload[p++];
+        uint8_t b = payload[p++];
+
+        leds[XY(x,y)] = CRGB(r,g,b);
+      }
     }
+    FastLED.show();
   }
 }
