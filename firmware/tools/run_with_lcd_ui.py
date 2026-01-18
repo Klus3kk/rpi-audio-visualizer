@@ -24,7 +24,6 @@ from firmware.effects.wave import WaveEffect
 from firmware.bt.ble_gatt_server import start_ble, SHARED
 
 
-# ---------------- CONST ----------------
 W, H = 16, 16
 NUM_LEDS = W * H
 
@@ -38,7 +37,6 @@ SR = 44100
 NFFT = 1024
 
 
-# ---------------- LOG ----------------
 def log_exc(tag: str, e: Exception):
     print(f"[ERR] {tag}: {e}", file=sys.stderr)
     traceback.print_exc()
@@ -98,7 +96,6 @@ def safe_update_effect(effect, feats, dt, params, effect_name: str):
 
 
 def sanitize_feats(feats: dict):
-    # Ensure finite values (bands/mag handled in FeatureExtractor already but guard anyway)
     try:
         for k in ("rms", "bass", "mid", "treble"):
             v = float(feats.get(k, 0.0))
@@ -124,7 +121,7 @@ def get_state():
         return {}
 
 
-# ---------------- THREADS: BLE ----------------
+# ---- BLE thread ----
 def ble_thread():
     try:
         start_ble()
@@ -134,7 +131,7 @@ def ble_thread():
 threading.Thread(target=ble_thread, daemon=True).start()
 
 
-# ---------------- THREADS: LED SENDER (non-blocking main) ----------------
+# ---- LED sender thread (prevents serial freeze from killing LCD) ----
 class LedSender(threading.Thread):
     def __init__(self, leds: Esp32SerialDriver):
         super().__init__(daemon=True)
@@ -143,7 +140,6 @@ class LedSender(threading.Thread):
         self._stop = threading.Event()
 
     def submit(self, frame):
-        # keep only latest (drop old)
         try:
             while True:
                 self.q.get_nowait()
@@ -171,7 +167,7 @@ class LedSender(threading.Thread):
         self._stop.set()
 
 
-# ---------------- THREADS: AUDIO (mic callback + bt worker) ----------------
+# ---- audio hub: mic callback + bt worker ----
 class AudioHub:
     def __init__(self, sr=SR, nfft=NFFT):
         self.sr = int(sr)
@@ -180,17 +176,13 @@ class AudioHub:
         self._lock = threading.Lock()
         self._latest = np.zeros(self.nfft, dtype=np.float32)
 
-        self._mic_stream: sd.InputStream | None = None
+        self._mic: sd.InputStream | None = None
         self._bt: BlueAlsaInput | None = None
-        self._bt_thread: threading.Thread | None = None
         self._bt_stop = threading.Event()
-
-        self.mode = "mic"
-        self.bt_addr = None
+        self._bt_thread: threading.Thread | None = None
 
     def start_mic(self):
         def cb(indata, frames, time_info, status):
-            # callback must be fast and never throw
             try:
                 x = indata[:, 0].astype(np.float32, copy=False)
                 if x.shape[0] >= self.nfft:
@@ -204,17 +196,16 @@ class AudioHub:
             except Exception:
                 pass
 
-        self._mic_stream = sd.InputStream(
+        self._mic = sd.InputStream(
             samplerate=self.sr,
             channels=1,
             blocksize=self.nfft,
             dtype="float32",
             callback=cb,
         )
-        self._mic_stream.start()
+        self._mic.start()
 
     def _bt_worker(self):
-        # NEVER block main thread; if bt read blocks, it blocks ONLY this worker
         while not self._bt_stop.is_set():
             bt = self._bt
             if bt is None or not bt.is_running():
@@ -226,38 +217,27 @@ class AudioHub:
                     x = np.zeros(self.nfft, dtype=np.float32)
             except Exception:
                 x = np.zeros(self.nfft, dtype=np.float32)
-
             with self._lock:
                 self._latest = x.astype(np.float32, copy=False)
-
             time.sleep(0.0)
 
-    def start_bt(self, bt_addr: str | None, playback=True, out_pcm=None):
+    def start_bt(self, bt_addr: str | None):
         self.stop_bt()
-
-        self.bt_addr = bt_addr
-        self._bt = BlueAlsaInput(
-            bt_addr=bt_addr,
-            rate=self.sr,
-            channels=2,
-            chunk_frames=self.nfft,
-            playback=playback,
-            out_pcm=out_pcm,
-        )
+        self._bt = BlueAlsaInput(bt_addr=bt_addr, rate=self.sr, channels=2, chunk_frames=self.nfft)
         self._bt.start()
-
         self._bt_stop.clear()
         self._bt_thread = threading.Thread(target=self._bt_worker, daemon=True)
         self._bt_thread.start()
 
     def stop_bt(self):
         self._bt_stop.set()
-        if self._bt is not None:
+        bt = self._bt
+        self._bt = None
+        if bt is not None:
             try:
-                self._bt.stop()
+                bt.stop()
             except Exception:
                 pass
-        self._bt = None
 
     def get_latest(self) -> np.ndarray:
         with self._lock:
@@ -265,16 +245,15 @@ class AudioHub:
 
     def close(self):
         self.stop_bt()
-        if self._mic_stream is not None:
+        if self._mic is not None:
             try:
-                self._mic_stream.stop()
-                self._mic_stream.close()
+                self._mic.stop()
+                self._mic.close()
             except Exception:
                 pass
-            self._mic_stream = None
+            self._mic = None
 
 
-# ---------------- MAIN ----------------
 def main():
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
@@ -332,6 +311,10 @@ def main():
             now = time.monotonic()
             st = get_state()
 
+            # ----- choose mode (BT only if connected==true) -----
+            raw_mode = str(st.get("mode", "mic")).lower()
+            desired_mode = "bt" if (raw_mode == "bt" and bool(st.get("connected", False))) else "mic"
+
             # ----- effect -----
             desired_fx = str(st.get("effect", effect_name)).lower()
             if desired_fx in effects and desired_fx != effect_name:
@@ -354,20 +337,13 @@ def main():
             if cm in ("auto", "rainbow", "mono"):
                 params["color_mode"] = cm
 
-            # ----- mode (BT only if connected true) -----
-            raw_mode = str(st.get("mode", "mic")).lower()
-            desired_mode = "bt" if (raw_mode == "bt" and bool(st.get("connected", False))) else "mic"
-
+            # ----- apply mode switch -----
             if desired_mode != current_mode:
                 current_mode = desired_mode
                 if current_mode == "bt":
                     bt_addr = str(st.get("device_addr", "")).strip() or None
                     try:
-                        audio.start_bt(
-                            bt_addr=bt_addr,
-                            playback=True,
-                            out_pcm="hdmi:CARD=vc4hdmi0,DEV=0",
-                        )
+                        audio.start_bt(bt_addr)
                     except Exception as e:
                         log_exc("audio.start_bt()", e)
                         audio.stop_bt()
@@ -375,7 +351,7 @@ def main():
                 else:
                     audio.stop_bt()
 
-            # ----- LCD (always) -----
+            # ----- LCD ALWAYS -----
             if now - t_lcd >= dt_lcd:
                 t_lcd = now
                 try:
@@ -405,9 +381,8 @@ def main():
                 except Exception as e:
                     log_exc("LCDUI.render()", e)
 
-            # ----- audio -> features (non-blocking) -----
+            # ----- audio -> features -----
             x = audio.get_latest()
-            # stabilize + gain
             x = x - float(np.mean(x))
             x = x * float(params["gain"])
 
@@ -417,12 +392,11 @@ def main():
                 last_feats = feats
             except Exception as e:
                 log_exc("FeatureExtractor.compute()", e)
-                feats = last_feats
 
-            # ----- LED update (submit to sender thread) -----
+            # ----- LED -----
             if now - t_led >= dt_led:
                 t_led = now
-                frame = safe_update_effect(effect, feats, dt_led, params, effect_name)
+                frame = safe_update_effect(effect, last_feats, dt_led, params, effect_name)
 
                 try:
                     if frame is None or len(frame) != NUM_LEDS:
@@ -435,7 +409,6 @@ def main():
 
                 led_sender.submit(frame)
 
-            # small sleep to avoid 100% CPU
             time.sleep(0.001)
 
     finally:
