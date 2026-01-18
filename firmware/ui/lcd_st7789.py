@@ -4,33 +4,50 @@ import spidev
 import numpy as np
 from PIL import Image
 
-try:
-    import RPi.GPIO as GPIO
-except Exception as e:
-    GPIO = None
+class _GPIO:
+    """
+    Minimalny wrapper na lgpio (bez RPi.GPIO).
+    """
+    def __init__(self):
+        import lgpio  # wymagane
+        self.lgpio = lgpio
+        self.h = lgpio.gpiochip_open(0)
+
+    def setup_out(self, pin: int, initial: int = 0):
+        self.lgpio.gpio_claim_output(self.h, pin, initial)
+
+    def write(self, pin: int, value: int):
+        self.lgpio.gpio_write(self.h, pin, 1 if value else 0)
+
+    def close(self):
+        try:
+            self.lgpio.gpiochip_close(self.h)
+        except Exception:
+            pass
+
+
+def _rgb888_to_rgb565be_bytes(img: Image.Image) -> bytes:
+    """
+    PIL RGB -> RGB565 big-endian bytes, szybkie (numpy).
+    """
+    arr = np.asarray(img.convert("RGB"), dtype=np.uint8)  # (H,W,3)
+    r = arr[..., 0].astype(np.uint16)
+    g = arr[..., 1].astype(np.uint16)
+    b = arr[..., 2].astype(np.uint16)
+    v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)  # RGB565
+    # big-endian:
+    v = v.byteswap()
+    return v.tobytes()
 
 
 class LcdSt7789:
     """
-    ST7789 SPI driver (RGB565).
-    Obsługa:
-      - rotate: 0 / 90 / 180 / 270 (logiczny rozmiar w/h zmienia się przy 90/270)
-      - CS na GPIO (software CS): cs=<BCM pin> + spidev.no_cs=True
-      - invert: True/False
+    ST7789 SPI (240x320 typowo), z renderem poziomym 320x240.
+
+    - SPI: /dev/spidev<bus>.<dev>
+    - DC, RST: GPIO BCM
+    - CS: używamy sprzętowego CS z spidev (nie ręczny GPIO CS)
     """
-
-    # ST7789 commands
-    _SWRESET = 0x01
-    _SLPOUT  = 0x11
-    _COLMOD  = 0x3A
-    _MADCTL  = 0x36
-    _INVON   = 0x21
-    _INVOFF  = 0x20
-    _DISPON  = 0x29
-    _CASET   = 0x2A
-    _RASET   = 0x2B
-    _RAMWR   = 0x2C
-
     def __init__(
         self,
         *,
@@ -38,188 +55,37 @@ class LcdSt7789:
         height=320,
         spi_bus=0,
         spi_dev=0,
-        spi_hz=24_000_000,
+        spi_hz=40_000_000,
         dc=25,
         rst=24,
-        cs=5,              # GPIO CS (BCM) ; ustaw None jeśli masz CE0/CE1
-        invert=True,
-        rotate=90,         # 90 => landscape (320x240) dla panelu 240x320
-        madctl_base=0x00,  # jeśli chcesz ręcznie, zostaw 0x00 i użyj rotate
+        rotate=90,          # 0/90/180/270
+        invert=True,        # bardzo często True dla ST7789
+        madctl_base=0x00,   # bazowy MADCTL
     ):
-        if GPIO is None:
-            raise RuntimeError("RPi.GPIO nie jest dostępne. Uruchamiasz to na RPi?")
-
         self.panel_w = int(width)
         self.panel_h = int(height)
 
-        self.spi_bus = int(spi_bus)
-        self.spi_dev = int(spi_dev)
-        self.spi_hz  = int(spi_hz)
+        # UI będzie poziomo: 320x240
+        # Jeśli panel jest 240x320, to poziomo to 320x240
+        self.W = int(height) if rotate in (90, 270) else int(width)
+        self.H = int(width)  if rotate in (90, 270) else int(height)
 
-        self.DC  = int(dc)
-        self.RST = int(rst)
-        self.CS  = None if cs is None else int(cs)
-
-        self.invert = bool(invert)
+        self.dc = int(dc)
+        self.rst = int(rst)
         self.rotate = int(rotate)
+        self.invert = bool(invert)
         self.madctl_base = int(madctl_base) & 0xFF
 
-        # logical width/height after rotation
-        if self.rotate in (90, 270):
-            self.w = self.panel_h
-            self.h = self.panel_w
-        else:
-            self.w = self.panel_w
-            self.h = self.panel_h
+        self.gpio = _GPIO()
+        self.gpio.setup_out(self.dc, 0)
+        self.gpio.setup_out(self.rst, 1)
 
-        self._init_gpio()
-        self._init_spi()
-        self._init_lcd()
-
-    # ---------- GPIO / SPI ----------
-
-    def _init_gpio(self):
-        # NOTE:
-        # Jeśli dostajesz "Cannot determine SOC peripheral base address",
-        # to uruchom ten program na RPi, i/lub:
-        #   sudo usermod -aG gpio,spi pi
-        #   (logout/login) albo uruchom test jako sudo.
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setwarnings(False)
-
-        GPIO.setup(self.DC, GPIO.OUT)
-        GPIO.setup(self.RST, GPIO.OUT)
-
-        if self.CS is not None:
-            GPIO.setup(self.CS, GPIO.OUT)
-            GPIO.output(self.CS, 1)
-
-    def _init_spi(self):
         self.spi = spidev.SpiDev()
-        self.spi.open(self.spi_bus, self.spi_dev)
-        self.spi.max_speed_hz = self.spi_hz
+        self.spi.open(int(spi_bus), int(spi_dev))
+        self.spi.max_speed_hz = int(spi_hz)
         self.spi.mode = 0
 
-        # jeśli CS jest na GPIO -> wyłącz HW CS w spidev
-        if self.CS is not None:
-            try:
-                self.spi.no_cs = True
-            except Exception:
-                pass
-
-    def _cs_low(self):
-        if self.CS is not None:
-            GPIO.output(self.CS, 0)
-
-    def _cs_high(self):
-        if self.CS is not None:
-            GPIO.output(self.CS, 1)
-
-    def _write(self, dc_level, data):
-        GPIO.output(self.DC, 1 if dc_level else 0)
-        self._cs_low()
-        if isinstance(data, (bytes, bytearray, memoryview)):
-            self.spi.writebytes2(data)
-        else:
-            self.spi.writebytes(data)
-        self._cs_high()
-
-    def _cmd(self, c):
-        self._write(0, [int(c) & 0xFF])
-
-    def _data(self, buf):
-        self._write(1, buf)
-
-    # ---------- LCD init ----------
-
-    def _reset(self):
-        GPIO.output(self.RST, 1)
-        time.sleep(0.05)
-        GPIO.output(self.RST, 0)
-        time.sleep(0.05)
-        GPIO.output(self.RST, 1)
-        time.sleep(0.12)
-
-    def _madctl_for_rotate(self):
-        # ST7789: MADCTL bits:
-        # MY 0x80, MX 0x40, MV 0x20, ML 0x10, RGB 0x00/BGR 0x08
-        # Tu zakładamy RGB. Jeśli kolory są złe, dodaj 0x08.
-        base = self.madctl_base & 0x1F  # zachowaj ewentualne BGR/ML
-        r = self.rotate % 360
-        if r == 0:
-            return base | 0x00
-        if r == 90:
-            return base | 0x60  # MV|MX
-        if r == 180:
-            return base | 0xC0  # MX|MY
-        if r == 270:
-            return base | 0xA0  # MV|MY
-        return base | 0x60
-
-    def _init_lcd(self):
-        self._reset()
-
-        self._cmd(self._SWRESET)
-        time.sleep(0.12)
-
-        self._cmd(self._SLPOUT)
-        time.sleep(0.12)
-
-        # 16-bit RGB565
-        self._cmd(self._COLMOD)
-        self._data([0x55])
-        time.sleep(0.01)
-
-        # rotation
-        self._cmd(self._MADCTL)
-        self._data([self._madctl_for_rotate()])
-        time.sleep(0.01)
-
-        # inversion (często potrzebne dla ST7789 modułów)
-        self._cmd(self._INVON if self.invert else self._INVOFF)
-        time.sleep(0.01)
-
-        self._cmd(self._DISPON)
-        time.sleep(0.12)
-
-    # ---------- Drawing ----------
-
-    def _set_window(self, x0, y0, x1, y1):
-        self._cmd(self._CASET)
-        self._data([x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF])
-
-        self._cmd(self._RASET)
-        self._data([y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF])
-
-        self._cmd(self._RAMWR)
-
-    @staticmethod
-    def _rgb565_bytes(img: Image.Image, w: int, h: int) -> bytes:
-        # szybka konwersja: RGB888 -> RGB565 big-endian
-        if img.size != (w, h):
-            img = img.resize((w, h), Image.NEAREST)
-        img = img.convert("RGB")
-
-        a = np.frombuffer(img.tobytes(), dtype=np.uint8).reshape((h, w, 3))
-        r = a[:, :, 0].astype(np.uint16)
-        g = a[:, :, 1].astype(np.uint16)
-        b = a[:, :, 2].astype(np.uint16)
-        v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)
-        v = v.byteswap()  # big-endian
-        return v.tobytes()
-
-    def display(self, img: Image.Image):
-        # pełny ekran
-        self._set_window(0, 0, self.w - 1, self.h - 1)
-        buf = self._rgb565_bytes(img, self.w, self.h)
-
-        GPIO.output(self.DC, 1)
-        self._cs_low()
-        mv = memoryview(buf)
-        chunk = 4096
-        for i in range(0, len(buf), chunk):
-            self.spi.writebytes2(mv[i:i + chunk])
-        self._cs_high()
+        self._init_panel()
 
     def close(self):
         try:
@@ -227,6 +93,93 @@ class LcdSt7789:
         except Exception:
             pass
         try:
-            GPIO.cleanup()
+            self.gpio.close()
         except Exception:
             pass
+
+    # --- low-level ---
+    def _cmd(self, c: int):
+        self.gpio.write(self.dc, 0)
+        self.spi.writebytes([c & 0xFF])
+
+    def _data(self, data):
+        self.gpio.write(self.dc, 1)
+        if isinstance(data, (bytes, bytearray)):
+            # chunkowanie żeby nie dusić writebytes
+            chunk = 4096
+            for i in range(0, len(data), chunk):
+                self.spi.writebytes(data[i:i+chunk])
+        else:
+            self.spi.writebytes([int(x) & 0xFF for x in data])
+
+    def _reset(self):
+        self.gpio.write(self.rst, 1)
+        time.sleep(0.02)
+        self.gpio.write(self.rst, 0)
+        time.sleep(0.05)
+        self.gpio.write(self.rst, 1)
+        time.sleep(0.12)
+
+    def _madctl_for_rotate(self) -> int:
+        # MADCTL bits: MY(0x80), MX(0x40), MV(0x20), RGB/BGR(0x08)
+        # Najbezpieczniejsze warianty dla ST7789:
+        r = self.rotate % 360
+        if r == 0:
+            rot = 0x00
+        elif r == 90:
+            rot = 0x60  # MV|MX
+        elif r == 180:
+            rot = 0xC0  # MY|MX
+        elif r == 270:
+            rot = 0xA0  # MV|MY
+        else:
+            rot = 0x00
+        return (self.madctl_base ^ rot) & 0xFF
+
+    def _init_panel(self):
+        self._reset()
+
+        self._cmd(0x01)  # SWRESET
+        time.sleep(0.12)
+
+        self._cmd(0x11)  # SLPOUT
+        time.sleep(0.12)
+
+        self._cmd(0x3A)  # COLMOD
+        self._data([0x55])  # 16-bit
+
+        self._cmd(0x36)  # MADCTL
+        self._data([self._madctl_for_rotate()])
+
+        if self.invert:
+            self._cmd(0x21)  # INVON
+        else:
+            self._cmd(0x20)  # INVOFF
+        time.sleep(0.01)
+
+        self._cmd(0x29)  # DISPON
+        time.sleep(0.12)
+
+        # czyść na czarno na start
+        self.clear()
+
+    def _set_window(self, x0, y0, x1, y1):
+        self._cmd(0x2A)  # CASET
+        self._data([x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF])
+
+        self._cmd(0x2B)  # RASET
+        self._data([y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF])
+
+        self._cmd(0x2C)  # RAMWR
+
+    # --- high-level ---
+    def clear(self):
+        img = Image.new("RGB", (self.W, self.H), (0, 0, 0))
+        self.display(img)
+
+    def display(self, img: Image.Image):
+        if img.size != (self.W, self.H):
+            img = img.resize((self.W, self.H))
+        self._set_window(0, 0, self.W - 1, self.H - 1)
+        buf = _rgb888_to_rgb565be_bytes(img)
+        self._data(buf)

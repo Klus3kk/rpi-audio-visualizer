@@ -1,129 +1,123 @@
 # firmware/ui/lcd_ui.py
 import time
 from PIL import Image, ImageDraw, ImageFont
-
 from firmware.ui.lcd_st7789 import LcdSt7789
 
+NEON = (0, 170, 255)
+NEON2 = (0, 90, 140)
+FG = (210, 240, 255)
+BG = (0, 0, 0)
 
 class LCDUI:
     """
-    Minimalne UI:
-      - tylko MIC / BT
-      - czarne tło
-      - neonowy niebieski
-      - “Nokia-ish”: proste prostokąty, bez rounded
-      - odświeżaj rzadko (w pętli głównej throttling)
+    UI poziome 320x240:
+    - tylko MIC / BT
+    - czarne tło
+    - prostokątne “nokia” elementy
+    - odświeżanie ograniczone (żeby nie lagowało wizualizacji)
     """
-
     def __init__(self, cfg: dict):
         self.cfg = cfg or {}
-        self.W = int(self.cfg.get("width_panel", 240))
-        self.H = int(self.cfg.get("height_panel", 320))
 
         self.dev = LcdSt7789(
-            width=self.W,
-            height=self.H,
+            width=int(self.cfg.get("width", 240)),
+            height=int(self.cfg.get("height", 320)),
             spi_bus=int(self.cfg.get("spi_bus", 0)),
             spi_dev=int(self.cfg.get("spi_dev", 0)),
-            spi_hz=int(self.cfg.get("spi_hz", 24_000_000)),
+            spi_hz=int(self.cfg.get("spi_hz", 40_000_000)),
             dc=int(self.cfg.get("dc", 25)),
             rst=int(self.cfg.get("rst", 24)),
-            cs=self.cfg.get("cs", 5),
-            invert=bool(self.cfg.get("invert", True)),
             rotate=int(self.cfg.get("rotate", 90)),
+            invert=bool(self.cfg.get("invert", True)),
             madctl_base=int(self.cfg.get("madctl_base", 0x00)),
         )
 
-        # po rotate=90 logika ekranu jest 320x240
-        self.w = self.dev.w
-        self.h = self.dev.h
+        self.W, self.H = self.dev.W, self.dev.H
 
+        # font: default jest OK; “dziwne obroty” były od złej rotacji panelu
         self.font = ImageFont.load_default()
-        self.mode = "MIC"  # MIC / BT
+
+        self.mode = "MIC"
         self.effect = "bars"
-        self.bt_status = "disconnected"
-
-        self._t = 0.0
-
-        # theme
-        self.bg = (0, 0, 0)
-        self.neon = (0, 180, 255)
-        self.dim = (0, 70, 110)
-        self.gray = (60, 60, 60)
-        self.white = (220, 220, 220)
-
-        # start screen
-        self.draw({"rms": 0.0, "level": 0.0})
+        self.rms = 0.0
+        self.energy = 0.0
+        self.last_draw = 0.0
+        self.min_period = float(self.cfg.get("ui_fps", 10.0))
+        self._dirty = True
 
     def set_mode(self, mode: str):
-        mode = (mode or "").upper()
-        self.mode = "BT" if mode.startswith("B") else "MIC"
+        mode = "BT" if str(mode).upper().startswith("B") else "MIC"
+        if mode != self.mode:
+            self.mode = mode
+            self._dirty = True
 
-    def set_effect(self, name: str):
-        self.effect = str(name or "bars")
-
-    def set_bt_status(self, s: str):
-        self.bt_status = str(s or "unknown")
-
-    def _bar(self, d: ImageDraw.ImageDraw, x, y, w, h, v01):
-        v01 = 0.0 if v01 < 0.0 else (1.0 if v01 > 1.0 else float(v01))
-        d.rectangle([x, y, x + w, y + h], outline=self.dim, width=1)
-        fillw = int(w * v01)
-        if fillw > 0:
-            d.rectangle([x + 1, y + 1, x + fillw, y + h - 1], fill=self.neon)
-
-    def draw(self, state: dict):
-        """
-        state: {"rms": float, "level": 0..1 (opcjonalnie), "effect": str (opcjonalnie)}
-        """
-        rms = float(state.get("rms", 0.0))
-        level = float(state.get("level", min(1.0, rms * 12.0)))
-        effect = state.get("effect", None)
-        if effect:
+    def set_status(self, *, effect=None, rms=None, energy=None):
+        if effect is not None and effect != self.effect:
             self.effect = str(effect)
+            self._dirty = True
+        if rms is not None:
+            self.rms = float(rms)
+        if energy is not None:
+            self.energy = float(energy)
 
-        img = Image.new("RGB", (self.w, self.h), self.bg)
+    def tick(self):
+        now = time.monotonic()
+        if not self._dirty and (now - self.last_draw) < (1.0 / max(1e-6, self.min_period)):
+            return
+        self.last_draw = now
+        self._dirty = False
+        self._render()
+
+    def _render(self):
+        img = Image.new("RGB", (self.W, self.H), BG)
         d = ImageDraw.Draw(img)
 
-        # header
-        d.rectangle([0, 0, self.w - 1, 34], outline=self.dim, width=1)
-        d.text((10, 10), "VISUALIZER", fill=self.neon, font=self.font)
+        # header tabs
+        pad = 12
+        tab_h = 44
+        tab_w = (self.W - 3 * pad) // 2
 
-        # mode switch: MIC / BT
-        # proste “kafelki”
-        bx = self.w - 140
-        by = 8
-        bw = 60
-        bh = 18
+        def tab(x, label, active):
+            y = pad
+            x0, y0 = x, y
+            x1, y1 = x + tab_w, y + tab_h
+            if active:
+                d.rectangle([x0, y0, x1, y1], outline=NEON, width=3, fill=(0, 0, 0))
+                d.text((x0 + 14, y0 + 14), label, font=self.font, fill=FG)
+            else:
+                d.rectangle([x0, y0, x1, y1], outline=NEON2, width=2, fill=(0, 0, 0))
+                d.text((x0 + 14, y0 + 14), label, font=self.font, fill=NEON2)
 
-        def pill(x, label, active):
-            d.rectangle([x, by, x + bw, by + bh], outline=self.neon if active else self.dim, width=1)
-            d.text((x + 12, by + 4), label, fill=self.neon if active else self.dim, font=self.font)
+        tab(pad, "MIC", self.mode == "MIC")
+        tab(2 * pad + tab_w, "BT", self.mode == "BT")
 
-        pill(bx, "MIC", self.mode == "MIC")
-        pill(bx + 70, "BT", self.mode == "BT")
+        # main panel
+        y0 = pad + tab_h + pad
+        d.rectangle([pad, y0, self.W - pad, self.H - pad], outline=NEON2, width=2)
 
-        # body boxes
-        y0 = 44
-        d.rectangle([10, y0, self.w - 11, y0 + 52], outline=self.dim, width=1)
-        d.text((18, y0 + 10), f"EFFECT: {self.effect}", fill=self.white, font=self.font)
+        # effect name
+        d.text((pad + 14, y0 + 14), f"EFFECT: {self.effect}", font=self.font, fill=FG)
 
-        # BT status (tylko gdy BT)
-        if self.mode == "BT":
-            d.text((18, y0 + 30), f"BT: {self.bt_status}", fill=self.white, font=self.font)
-        else:
-            d.text((18, y0 + 30), "INPUT: MIC", fill=self.white, font=self.font)
+        # meters (nokia-like bars)
+        # RMS bar
+        rms = min(1.0, max(0.0, self.rms * 10.0))  # prosty scaling
+        energy = min(1.0, max(0.0, self.energy))
 
-        # level bar
-        y1 = y0 + 70
-        d.text((10, y1), "LEVEL", fill=self.dim, font=self.font)
-        self._bar(d, 10, y1 + 16, self.w - 21, 16, level)
+        def meter(y, label, v):
+            d.text((pad + 14, y), label, font=self.font, fill=NEON)
+            x0 = pad + 14
+            y0m = y + 18
+            w = self.W - 2 * pad - 28
+            h = 14
+            d.rectangle([x0, y0m, x0 + w, y0m + h], outline=NEON2, width=2)
+            fill_w = int(w * v)
+            if fill_w > 0:
+                d.rectangle([x0 + 2, y0m + 2, x0 + 2 + fill_w, y0m + h - 2], fill=NEON)
 
-        # footer “hint”
-        d.rectangle([0, self.h - 28, self.w - 1, self.h - 1], outline=self.dim, width=1)
-        d.text((10, self.h - 20), "BTN: hold to switch mode", fill=self.dim, font=self.font)
+        meter(y0 + 54, "RMS", rms)
+        meter(y0 + 92, "ENERGY", energy)
+
+        # footer hint
+        d.text((pad + 14, self.H - pad - 20), "Mode: MIC/BT", font=self.font, fill=NEON2)
 
         self.dev.display(img)
-
-    def close(self):
-        self.dev.close()
