@@ -240,8 +240,8 @@ class LCDUI:
     def render(self):
         # neon palette (czarno-niebieskie)
         BG   = (0, 0, 0)
-        ACC  = self._mul((0, 170, 255), self.dim)
-        ACC2 = self._mul((0, 80, 140), self.dim)
+        ACC  = self._mul((30, 140, 255), self.dim)   # bardziej niebieski neon
+        ACC2 = self._mul((10, 60, 120), self.dim)    # ciemniejszy niebieski
         TXT  = self._mul((220, 235, 255), self.dim)
         SUB  = self._mul((100, 130, 155), self.dim)
         GRID = self._mul((0, 45, 70), self.dim)
