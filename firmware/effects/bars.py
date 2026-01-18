@@ -5,11 +5,10 @@ class BarsEffect:
     """
     Filozofia:
     - X: 16 pasm częstotliwości (lewo->prawo, niskie->wysokie)
-         pasmo i => [i*1250 .. (i+1)*1250] Hz, do 20kHz
     - Y: poziom (wysokość)
     - Jasność STAŁA (nie rośnie po puknięciu w mikrofon).
       Audio wpływa tylko na wysokość.
-    - Cisza = target=0 i opadanie (bez “tańca”, ale też bez natychmiastowego znikania).
+    - Cisza = czarne (brak “tańca” po wyciszeniu).
     - Mapowanie LED: efekt zwraca frame w porządku row-major:
         idx = y*w + x  (y=0 dół, y rośnie do góry)
       Serpentine robi ESP32.
@@ -19,32 +18,24 @@ class BarsEffect:
         self,
         w=16,
         h=16,
-
         # reakcja:
         attack=0.55,              # 0..1, większe = szybciej rośnie do targetu
-        decay_px_per_s=7.0,       # px/s opadania (mniejsze = wolniej opada)
-        peak_decay_px_per_s=3.5,
-
+        decay_px_per_s=9.0,       # px/s opadania
+        peak_decay_px_per_s=5.0,
         # cisza:
-        rms_gate=0.012,           # RMS poniżej => silent
-        gate=0.06,                # gate na pasmach (po normalizacji)
-
+        rms_gate=0.012,           # twardy gate po RMS: cisza -> natychmiast czarno
+        gate=0.06,                # gate na wartościach pasm (po normalizacji)
         # jasność stała:
-        hsv_v=0.22,               # jasność słupka (0.15..0.35)
+        hsv_v=0.22,               # 0..1 (realnie 0.15..0.35)
         hsv_s=1.0,
-
         # pasma:
-        band_hz=1250.0,
+        band_hz=1250.0,           # 20k/16 = 1250 Hz
         fmax=20000.0,
         floor_px=0.0,
 
         # stała skala pasm (żeby nie skakało między klatkami):
-        NOISE_FLOOR_DB=-78.0,
-        RANGE_DB=48.0,
-
-        # gradient kolorów po Y:
-        y_hue_shift=0.18,         # ile hue zmienia się od dołu do góry (0.10..0.30)
-        peak_boost=1.20,          # peak delikatnie jaśniejszy (ale nadal limitowany)
+        NOISE_FLOOR_DB=-78.0,     # poniżej = cisza
+        RANGE_DB=48.0,            # zakres mapowany do 0..1
     ):
         self.w = int(w)
         self.h = int(h)
@@ -69,13 +60,12 @@ class BarsEffect:
         self.NOISE_FLOOR_DB = float(NOISE_FLOOR_DB)
         self.RANGE_DB = float(RANGE_DB)
 
-        self.y_hue_shift = float(y_hue_shift)
-        self.peak_boost = float(peak_boost)
-
-        # bazowe hue per kolumna (X=pasmo), precompute
-        self._hue_x = np.zeros(self.w, dtype=np.float32)
+        # precompute stałych kolorów (żeby nie liczyć HSV w każdej klatce)
+        self._colors = []
         for x in range(self.w):
-            self._hue_x[x] = x / max(1, self.w - 1)
+            hue = x / max(1, self.w - 1)
+            r, g, b = colorsys.hsv_to_rgb(hue, self.hsv_s, self.hsv_v)
+            self._colors.append((int(r * 255), int(g * 255), int(b * 255)))
 
         # do wygładzania PASM (osobno od smoothing w FeatureExtractor)
         self._prev_vals = np.zeros(self.w, dtype=np.float32)
@@ -92,6 +82,7 @@ class BarsEffect:
 
         hz_per_bin = sr / float(nfft)
 
+        # energia w paśmie (mean power)
         band_pow = np.zeros(self.w, dtype=np.float32)
         for i in range(self.w):
             lo_hz = i * self.band_hz
@@ -108,10 +99,13 @@ class BarsEffect:
             else:
                 band_pow[i] = float(np.mean(mag2[lo:hi]))
 
+        # dB (stała skala)
         band_db = 10.0 * np.log10(band_pow + 1e-12).astype(np.float32)
 
+        # map do 0..1
         vals = (band_db - self.NOISE_FLOOR_DB) / self.RANGE_DB
         vals = np.clip(vals, 0.0, 1.0)
+
         return vals
 
     def update(self, features, dt, params=None):
@@ -127,7 +121,7 @@ class BarsEffect:
 
         silent = (rms < self.rms_gate)
         if silent:
-            # kasujemy pamięć pasm, żeby po ciszy nie “pompowało” od szumu
+            # kasujemy pamięć pasm, żeby nie “tańczyło” od szumu po ciszy
             self._prev_vals *= 0.0
 
         # preferuj mag2 (power) z FeatureExtractor
@@ -147,7 +141,7 @@ class BarsEffect:
                 vals = bands
             vals = np.clip(vals, 0.0, 1.0)
 
-        # jeśli cisza: target=0, ale level/peak opadają powoli (bez natychmiastowego resetu)
+        # jeśli cisza: target=0, ale level/peak opadają powoli
         if silent:
             vals[:] = 0.0
 
@@ -156,11 +150,11 @@ class BarsEffect:
         vals = (1.0 - alpha) * self._prev_vals + alpha * vals
         self._prev_vals = vals
 
-        # gate na pasmach (po wygładzeniu)
+        # gate na pasmach
         vals = vals.copy()
         vals[vals < self.gate] = 0.0
 
-        # intensity skaluje wysokość, NIE jasność
+        # intensity tylko skaluje wysokość, NIE jasność
         vals = np.clip(vals * (0.55 + 1.45 * intensity), 0.0, 1.0)
 
         target = vals * (self.h - 1)
@@ -183,35 +177,21 @@ class BarsEffect:
         # budowa ramki: row-major, y=0 dół
         frame = [(0, 0, 0)] * (self.w * self.h)
 
-        S = self.hsv_s
-        V = self.hsv_v
-
         for x in range(self.w):
-            hue_base = float(self._hue_x[x])
+            hh = int(round(self.level[x]))
+            py = int(round(self.peak[x]))
 
-            lvl = float(self.level[x])
-            if lvl <= 0.0:
-                continue
+            r, g, b = self._colors[x]
 
-            # 1) start od y=0: floor zamiast round + rysujemy zawsze y=0..hh
-            hh = int(np.floor(lvl + 1e-6))
-            if hh < 0:
-                hh = 0
-            if hh > self.h - 1:
-                hh = self.h - 1
+            if hh > 0:
+                for y in range(hh + 1):
+                    frame[y * self.w + x] = (r, g, b)
 
-            for y in range(hh + 1):
-                t = y / max(1, (self.h - 1))
-                hue = (hue_base + self.y_hue_shift * t) % 1.0
-                r, g, b = colorsys.hsv_to_rgb(hue, S, V)
-                frame[y * self.w + x] = (int(r * 255), int(g * 255), int(b * 255))
-
-            # peak
-            py = int(np.floor(float(self.peak[x]) + 1e-6))
             if 0 < py < self.h:
-                t = py / max(1, (self.h - 1))
-                hue = (hue_base + self.y_hue_shift * t) % 1.0
-                pr, pg, pb = colorsys.hsv_to_rgb(hue, S, min(1.0, V * self.peak_boost))
-                frame[py * self.w + x] = (int(pr * 255), int(pg * 255), int(pb * 255))
+                pidx = py * self.w + x
+                frame[pidx] = (min(255, int(r * 1.25)),
+                            min(255, int(g * 1.25)),
+                            min(255, int(b * 1.25)))
 
         return frame
+
