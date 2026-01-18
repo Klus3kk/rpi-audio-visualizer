@@ -75,9 +75,6 @@ class BarsEffect:
         self.v_top = float(v_top)
         self.peak_boost = float(peak_boost)
         self.power_limit = float(power_limit)
-        
-        self.signal_hold_s = 0.45   # 0.3..0.8
-        self._signal_timer = 0.0
 
         if x_map is None:
             self.x_map = list(range(self.w))
@@ -186,18 +183,9 @@ class BarsEffect:
 
         frame = [(0, 0, 0)] * (self.w * self.h)
 
-        # wykrycie sygnału po gate
-        detected = bool(np.max(vals) > 0.0)
-
-        # timer-hold: jak wykryjesz sygnał, trzymaj "aktywny" jeszcze chwilę
-        if detected:
-            self._signal_timer = self.signal_hold_s
-        else:
-            self._signal_timer = max(0.0, self._signal_timer - dt)
-
-        active = (self._signal_timer > 0.0)
-        min_rows = self.min_fill_rows if active else 0
-
+        # jeśli w ogóle jest sygnał (po gate), to włącz "dwa poziomy na dół"
+        has_signal = bool(np.max(vals) > 0.0)
+        min_rows = self.min_fill_rows if has_signal else 0
 
         for x in range(self.w):
             hh = int(np.clip(np.round(self.level[x]), 0, self.h - 1))
