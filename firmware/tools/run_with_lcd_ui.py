@@ -23,7 +23,7 @@ NUM_LEDS = W * H
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
-FPS_LED = 20.0
+FPS_LED = 10.0
 FPS_LCD = 30.0
 
 
@@ -79,9 +79,9 @@ def main():
 
     # visual params (pod UI i efekty)
     params = {
-        "intensity": 0.75,
+        "intensity": 0.65,
         "color_mode": "auto",
-        "power": 0.70,
+        "power": 0.50,
         "glow": 0.25,
     }
 
