@@ -66,8 +66,8 @@ def main():
         dim=0.90,
         font_size=13,
         font_size_big=18,
-        accent=(30, 140, 255),
-        bg=(0, 0, 0),
+        # accent=(30, 140, 255),
+        # bg=(0, 0, 0),
     )
 
     # ---- LED ----
