@@ -1,14 +1,25 @@
 # firmware/bt/ble_gatt_server.py
-# BLE GATT server for Visualizer (BlueZ + D-Bus)
-# JSON control via WRITE characteristic.
+# BlueZ GATT server (DBus) - Visualizer
+# JSON control via WRITE characteristic + STATE readable.
+#
+# Requires: python3-dbus, python3-gi
+#
+# Run note: registering advertisement often requires root or proper polkit rules.
+# If it fails, run your main script with: sudo -E python3 -u -m firmware.tools.run_with_lcd_ui
 
 import json
 import threading
-from gi.repository import GLib
-from pydbus import SystemBus
+import dbus
+import dbus.exceptions
+import dbus.mainloop.glib
+import dbus.service
 
-BLUEZ = "org.bluez"
+from gi.repository import GLib
+
+BLUEZ_SERVICE_NAME = "org.bluez"
 DBUS_OM_IFACE = "org.freedesktop.DBus.ObjectManager"
+DBUS_PROP_IFACE = "org.freedesktop.DBus.Properties"
+
 GATT_MANAGER_IFACE = "org.bluez.GattManager1"
 LE_ADV_MANAGER_IFACE = "org.bluez.LEAdvertisingManager1"
 
@@ -16,18 +27,14 @@ GATT_SERVICE_IFACE = "org.bluez.GattService1"
 GATT_CHRC_IFACE = "org.bluez.GattCharacteristic1"
 LE_ADV_IFACE = "org.bluez.LEAdvertisement1"
 
-# D-Bus bus name MUST be like "com.something"
-BUS_NAME = "com.visualizer.rpi"
+# UUIDs
+SVC_UUID = "12345678-1234-5678-1234-56789abcdef0"
+CMD_UUID = "12345678-1234-5678-1234-56789abcdef9"   # WRITE
+STATE_UUID = "12345678-1234-5678-1234-56789abcdef8" # READ/NOTIFY(optional)
 
-SVC_UUID   = "12345678-1234-5678-1234-56789abcdef0"
-CMD_UUID   = "12345678-1234-5678-1234-56789abcdef9"
-STATE_UUID = "12345678-1234-5678-1234-56789abcdef8"
-
-APP_PATH = "/com/visualizer"
-SVC_PATH = APP_PATH + "/service0"
-CMD_PATH = SVC_PATH + "/char0"
-STATE_PATH = SVC_PATH + "/char1"
-ADV_PATH = APP_PATH + "/adv0"
+# Paths
+APP_PATH = "/com/visualizer/app"
+ADV_PATH = "/com/visualizer/adv"
 
 
 # ===================== SHARED STATE =====================
@@ -65,145 +72,231 @@ class SharedState:
 SHARED = SharedState()
 
 
-# ===================== GATT OBJECTS =====================
+# ===================== HELPERS =====================
 
-class Application:
-    def __init__(self):
+def _find_adapter(bus):
+    om = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, "/"), DBUS_OM_IFACE)
+    objects = om.GetManagedObjects()
+    for path, ifaces in objects.items():
+        if LE_ADV_MANAGER_IFACE in ifaces and GATT_MANAGER_IFACE in ifaces:
+            return path
+    raise RuntimeError("No BLE adapter with LEAdvertisingManager1 + GattManager1 found")
+
+
+def _to_dbus_array_of_bytes(b: bytes):
+    return dbus.Array([dbus.Byte(x) for x in b], signature="y")
+
+
+# ===================== DBUS BASE CLASSES =====================
+
+class Application(dbus.service.Object):
+    """
+    org.freedesktop.DBus.ObjectManager
+    """
+    def __init__(self, bus):
         self.path = APP_PATH
-        self.services = [Service()]
+        self.bus = bus
+        self.services = []
+        super().__init__(bus, self.path)
 
+    def add_service(self, service):
+        self.services.append(service)
+
+    @dbus.service.method(DBUS_OM_IFACE, out_signature="a{oa{sa{sv}}}")
     def GetManagedObjects(self):
-        objs = {}
-        for s in self.services:
-            objs[s.path] = s.get_props()
-            for c in s.characteristics:
-                objs[c.path] = c.get_props()
-        return objs
+        response = {}
+        for service in self.services:
+            response[service.get_path()] = service.get_properties()
+            for chrc in service.characteristics:
+                response[chrc.get_path()] = chrc.get_properties()
+        return response
 
 
-class Service:
-    def __init__(self):
-        self.path = SVC_PATH
-        self.uuid = SVC_UUID
-        self.primary = True
-        self.characteristics = [CmdCharacteristic(), StateCharacteristic()]
+class Service(dbus.service.Object):
+    """
+    org.bluez.GattService1
+    """
+    def __init__(self, bus, index, uuid, primary=True):
+        self.bus = bus
+        self.path = APP_PATH + f"/service{index}"
+        self.uuid = uuid
+        self.primary = primary
+        self.characteristics = []
+        super().__init__(bus, self.path)
 
-    def get_props(self):
+    def add_characteristic(self, chrc):
+        self.characteristics.append(chrc)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def get_properties(self):
         return {
             GATT_SERVICE_IFACE: {
                 "UUID": self.uuid,
                 "Primary": self.primary,
-                "Characteristics": [c.path for c in self.characteristics],
+                "Characteristics": dbus.Array(
+                    [c.get_path() for c in self.characteristics],
+                    signature="o",
+                ),
             }
         }
 
+    @dbus.service.method(DBUS_PROP_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != GATT_SERVICE_IFACE:
+            raise dbus.exceptions.DBusException("org.bluez.Error.InvalidArgs", "Wrong interface")
+        return self.get_properties()[GATT_SERVICE_IFACE]
 
-class CmdCharacteristic:
-    def __init__(self):
-        self.path = CMD_PATH
-        self.uuid = CMD_UUID
-        self.flags = ["write", "write-without-response"]
 
+class Characteristic(dbus.service.Object):
+    """
+    org.bluez.GattCharacteristic1
+    """
+    def __init__(self, bus, index, uuid, flags, service):
+        self.bus = bus
+        self.path = service.path + f"/char{index}"
+        self.uuid = uuid
+        self.flags = flags
+        self.service = service
+        self.notifying = False
+        super().__init__(bus, self.path)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def get_properties(self):
+        return {
+            GATT_CHRC_IFACE: {
+                "Service": self.service.get_path(),
+                "UUID": self.uuid,
+                "Flags": dbus.Array(self.flags, signature="s"),
+            }
+        }
+
+    @dbus.service.method(DBUS_PROP_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != GATT_CHRC_IFACE:
+            raise dbus.exceptions.DBusException("org.bluez.Error.InvalidArgs", "Wrong interface")
+        return self.get_properties()[GATT_CHRC_IFACE]
+
+    @dbus.service.method(GATT_CHRC_IFACE, in_signature="a{sv}", out_signature="ay")
+    def ReadValue(self, options):
+        raise dbus.exceptions.DBusException("org.bluez.Error.NotPermitted", "Read not permitted")
+
+    @dbus.service.method(GATT_CHRC_IFACE, in_signature="aya{sv}")
+    def WriteValue(self, value, options):
+        raise dbus.exceptions.DBusException("org.bluez.Error.NotPermitted", "Write not permitted")
+
+    @dbus.service.method(GATT_CHRC_IFACE)
+    def StartNotify(self):
+        self.notifying = True
+
+    @dbus.service.method(GATT_CHRC_IFACE)
+    def StopNotify(self):
+        self.notifying = False
+
+
+class Advertisement(dbus.service.Object):
+    """
+    org.bluez.LEAdvertisement1
+    """
+    def __init__(self, bus, index, ad_type="peripheral"):
+        self.bus = bus
+        self.path = ADV_PATH + str(index)
+        self.ad_type = ad_type
+        self.service_uuids = [SVC_UUID]
+        self.local_name = "Visualizer"
+        self.include_tx_power = True
+        super().__init__(bus, self.path)
+
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
+    def get_properties(self):
+        props = {
+            "Type": self.ad_type,
+            "ServiceUUIDs": dbus.Array(self.service_uuids, signature="s"),
+            "LocalName": dbus.String(self.local_name),
+        }
+        if self.include_tx_power:
+            props["IncludeTxPower"] = dbus.Boolean(True)
+        return {LE_ADV_IFACE: props}
+
+    @dbus.service.method(DBUS_PROP_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, interface):
+        if interface != LE_ADV_IFACE:
+            raise dbus.exceptions.DBusException("org.bluez.Error.InvalidArgs", "Wrong interface")
+        return self.get_properties()[LE_ADV_IFACE]
+
+    @dbus.service.method(LE_ADV_IFACE)
+    def Release(self):
+        pass
+
+
+# ===================== YOUR CHARACTERISTICS =====================
+
+class CmdCharacteristic(Characteristic):
+    def __init__(self, bus, index, service):
+        super().__init__(bus, index, CMD_UUID, ["write", "write-without-response"], service)
+
+    @dbus.service.method(GATT_CHRC_IFACE, in_signature="aya{sv}")
     def WriteValue(self, value, options):
         try:
-            txt = bytes(value).decode("utf-8", errors="ignore")
+            b = bytes(value)
+            txt = b.decode("utf-8", errors="ignore")
             patch = json.loads(txt)
             if isinstance(patch, dict):
                 SHARED.update(patch)
         except Exception:
             pass
 
-    def get_props(self):
-        return {
-            GATT_CHRC_IFACE: {
-                "UUID": self.uuid,
-                "Service": SVC_PATH,
-                "Flags": self.flags,
-            }
-        }
 
+class StateCharacteristic(Characteristic):
+    def __init__(self, bus, index, service):
+        # notify jest opcjonalne; bez push i tak OK (read działa)
+        super().__init__(bus, index, STATE_UUID, ["read", "notify"], service)
 
-class StateCharacteristic:
-    def __init__(self):
-        self.path = STATE_PATH
-        self.uuid = STATE_UUID
-        self.flags = ["read", "notify"]
-
+    @dbus.service.method(GATT_CHRC_IFACE, in_signature="a{sv}", out_signature="ay")
     def ReadValue(self, options):
         data = json.dumps(SHARED.snapshot()).encode("utf-8")
-        return list(data)
-
-    def StartNotify(self):
-        # notify jest opcjonalne; jeśli nie implementujesz push, to i tak OK
-        pass
-
-    def StopNotify(self):
-        pass
-
-    def get_props(self):
-        return {
-            GATT_CHRC_IFACE: {
-                "UUID": self.uuid,
-                "Service": SVC_PATH,
-                "Flags": self.flags,
-            }
-        }
+        return _to_dbus_array_of_bytes(data)
 
 
-class Advertisement:
-    def __init__(self):
-        self.path = ADV_PATH
-        self.props = {
-            LE_ADV_IFACE: {
-                "Type": "peripheral",
-                "ServiceUUIDs": [SVC_UUID],
-                "LocalName": "Visualizer",
-                "IncludeTxPower": True,
-            }
-        }
-
-    def Release(self):
-        pass
-
-    def get_props(self):
-        return self.props
+class VisualizerService(Service):
+    def __init__(self, bus, index=0):
+        super().__init__(bus, index, SVC_UUID, primary=True)
+        self.add_characteristic(CmdCharacteristic(bus, 0, self))
+        self.add_characteristic(StateCharacteristic(bus, 1, self))
 
 
 # ===================== SERVER START =====================
 
-def _find_adapter(bus):
-    om = bus.get(BLUEZ, "/")
-    objects = om.GetManagedObjects()
-    for path, ifaces in objects.items():
-        if LE_ADV_MANAGER_IFACE in ifaces and GATT_MANAGER_IFACE in ifaces:
-            return path
-    raise RuntimeError("BLE adapter not found (no LEAdvertisingManager1/GattManager1)")
-
-
 def start_ble():
-    bus = SystemBus()
-    adapter = _find_adapter(bus)
+    """
+    Starts BLE GATT + Advertisement.
+    If you get permission errors, run the whole app with sudo.
+    """
+    dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+    bus = dbus.SystemBus()
 
-    app = Application()
-    svc = app.services[0]
-    cmd = svc.characteristics[0]
-    stc = svc.characteristics[1]
-    adv = Advertisement()
+    adapter_path = _find_adapter(bus)
 
-    # IMPORTANT: first argument is BUS_NAME, not object path
-    bus.publish(
-        BUS_NAME,
-        (APP_PATH, app),
-        (SVC_PATH, svc),
-        (CMD_PATH, cmd),
-        (STATE_PATH, stc),
-        (ADV_PATH, adv),
-    )
+    app = Application(bus)
+    app.add_service(VisualizerService(bus, 0))
 
-    gatt_mgr = bus.get(BLUEZ, adapter)
-    adv_mgr = bus.get(BLUEZ, adapter)
+    service_manager = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, adapter_path), GATT_MANAGER_IFACE)
+    ad_manager = dbus.Interface(bus.get_object(BLUEZ_SERVICE_NAME, adapter_path), LE_ADV_MANAGER_IFACE)
 
-    gatt_mgr.RegisterApplication(APP_PATH, {})
-    adv_mgr.RegisterAdvertisement(ADV_PATH, {})
+    adv = Advertisement(bus, 0, ad_type="peripheral")
+
+    # Register
+    service_manager.RegisterApplication(app.get_path(), {},
+                                        reply_handler=lambda: None,
+                                        error_handler=lambda e: print("GATT register failed:", e))
+
+    ad_manager.RegisterAdvertisement(adv.get_path(), {},
+                                     reply_handler=lambda: None,
+                                     error_handler=lambda e: print("ADV register failed:", e))
 
     GLib.MainLoop().run()
