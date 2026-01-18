@@ -1,6 +1,9 @@
 # firmware/tools/run_with_lcd_ui.py
 # python3 -u -m firmware.tools.run_with_lcd_ui
 
+import traceback
+import sys
+
 import threading
 import time
 import numpy as np
@@ -34,6 +37,11 @@ FPS_LCD = 20.0
 
 SR = 44100
 NFFT = 1024
+
+
+def log_exc(tag: str, e: Exception):
+    print(f"[ERR] {tag}: {e}", file=sys.stderr)
+    traceback.print_exc()
 
 
 def make_effects(w=W, h=H):
@@ -74,6 +82,42 @@ def f01(v, default):
     if x > 1.0:
         return 1.0
     return x
+
+
+def safe_update_effect(effect, feats, dt, params, effect_name: str, effects: dict):
+    """
+    Never let an effect crash the main loop.
+    If effect.update throws -> log + reset effect instance + return black frame.
+    """
+    try:
+        try:
+            frame = effect.update(feats, dt, params)
+        except TypeError:
+            frame = effect.update(feats, dt)
+        return frame, effect
+    except Exception as e:
+        log_exc(f"effect.update({effect_name})", e)
+        # reset effect instance (best-effort)
+        try:
+            effect = effects[effect_name]
+        except Exception:
+            pass
+        return [(0, 0, 0)] * NUM_LEDS, effect
+
+
+def sanitize_feats(feats: dict):
+    # NaN/inf guard (NaNs frequently crash visuals)
+    try:
+        for k, v in list(feats.items()):
+            try:
+                fv = float(v)
+                if not np.isfinite(fv):
+                    feats[k] = 0.0
+            except Exception:
+                feats[k] = 0.0
+    except Exception:
+        pass
+    return feats
 
 
 def main():
@@ -135,7 +179,8 @@ def main():
 
     try:
         while True:
-            now = time.monotonic()
+            loop_start = time.monotonic()
+            now = loop_start
             st = get_state()
 
             # ---- desired mode
@@ -170,7 +215,6 @@ def main():
                 current_mode = desired_mode
 
                 if current_mode == "bt":
-                    # bt_addr najlepiej ustaw w env VIS_BT_ADDR albo wysyłaj przez BLE jako device_addr
                     bt_addr = str(st.get("device_addr", "")).strip() or None
                     try:
                         bt_in = BlueAlsaInput(
@@ -182,117 +226,138 @@ def main():
                             out_pcm="hdmi:CARD=vc4hdmi0,DEV=0",  # zmień jeśli chcesz inne wyjście
                         )
                         bt_in.start()
-                    except Exception:
+                    except Exception as e:
+                        log_exc("BlueAlsaInput.start()", e)
                         bt_in = None
                 else:
                     try:
                         if bt_in is not None:
                             bt_in.stop()
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        log_exc("BlueAlsaInput.stop()", e)
                     bt_in = None
 
             # ---- audio block
             if current_mode == "bt":
                 if bt_in is not None and bt_in.is_running():
-                    x = bt_in.read_mono_f32()
+                    try:
+                        x = bt_in.read_mono_f32()
+                    except Exception as e:
+                        log_exc("bt_in.read_mono_f32()", e)
+                        x = np.zeros(NFFT, dtype=np.float32)
                 else:
                     x = np.zeros(NFFT, dtype=np.float32)
             else:
                 try:
                     x, _ = mic_stream.read(NFFT)
                     x = x[:, 0].astype(np.float32, copy=False)
-                except Exception:
+                except Exception as e:
+                    log_exc("mic_stream.read()", e)
                     x = np.zeros(NFFT, dtype=np.float32)
 
             # ---- stabilize low-end + gain
-            x = x - float(np.mean(x))
-            x = x * float(params["gain"])
+            try:
+                x = x - float(np.mean(x))
+            except Exception:
+                pass
+            try:
+                x = x * float(params["gain"])
+            except Exception:
+                pass
 
             # ---- features
             try:
                 feats = fe.compute(x)
+                feats = sanitize_feats(feats)
                 last_feats = feats
-            except Exception:
+            except Exception as e:
+                log_exc("FeatureExtractor.compute()", e)
                 feats = last_feats
 
             # ---- LED
             if now - t_led >= dt_led:
                 t_led = now
+
+                frame, effect = safe_update_effect(effect, feats, dt_led, params, effect_name, effects)
+
+                # frame sanity
                 try:
-                    try:
-                        frame = effect.update(feats, dt_led, params)
-                    except TypeError:
-                        frame = effect.update(feats, dt_led)
-                except Exception:
+                    if frame is None or len(frame) != NUM_LEDS:
+                        frame = [(0, 0, 0)] * NUM_LEDS
+                    else:
+                        frame = [(clamp8(int(r)), clamp8(int(g)), clamp8(int(b))) for (r, g, b) in frame]
+                except Exception as e:
+                    log_exc("frame.sanitize", e)
                     frame = [(0, 0, 0)] * NUM_LEDS
 
-                if len(frame) != NUM_LEDS:
-                    frame = [(0, 0, 0)] * NUM_LEDS
-                else:
-                    frame = [(clamp8(int(r)), clamp8(int(g)), clamp8(int(b))) for (r, g, b) in frame]
-
+                # serial safe
                 try:
                     push_frame(leds, frame)
-                except Exception:
+                except Exception as e:
+                    log_exc("push_frame(serial)", e)
                     pass
 
             # ---- LCD
             if now - t_lcd >= dt_lcd:
                 t_lcd = now
 
-                ui.set_mode(current_mode)
-                ui.set_effect(effect_name)
-                ui.set_visual_params(intensity=params["intensity"], color_mode=params["color_mode"])
-                ui.set_mic_feats(
-                    rms=float(feats.get("rms", 0.0)),
-                    bass=float(feats.get("bass", 0.0)),
-                    mid=float(feats.get("mid", 0.0)),
-                    treble=float(feats.get("treble", 0.0)),
-                )
-
-                if current_mode == "bt":
-                    ui.set_bt(
-                        connected=bool(st.get("connected", True)),
-                        device_name=str(st.get("device_name", "")),
-                        device_addr=str(st.get("device_addr", "")),
-                    )
-                    ui.set_track(
-                        artist=str(st.get("artist", "")),
-                        title=str(st.get("title", "")),
-                    )
-                    ui.set_status("bt mode")
-                else:
-                    ui.set_status("mic mode")
-
                 try:
+                    ui.set_mode(current_mode)
+                    ui.set_effect(effect_name)
+                    ui.set_visual_params(intensity=params["intensity"], color_mode=params["color_mode"])
+                    ui.set_mic_feats(
+                        rms=float(feats.get("rms", 0.0)),
+                        bass=float(feats.get("bass", 0.0)),
+                        mid=float(feats.get("mid", 0.0)),
+                        treble=float(feats.get("treble", 0.0)),
+                    )
+
+                    if current_mode == "bt":
+                        ui.set_bt(
+                            connected=bool(st.get("connected", True)),
+                            device_name=str(st.get("device_name", "")),
+                            device_addr=str(st.get("device_addr", "")),
+                        )
+                        ui.set_track(
+                            artist=str(st.get("artist", "")),
+                            title=str(st.get("title", "")),
+                        )
+                        ui.set_status("bt mode")
+                    else:
+                        ui.set_status("mic mode")
+
                     ui.render()
-                except Exception:
-                    pass
+                except Exception as e:
+                    log_exc("LCDUI.render()", e)
+
+            # ---- watchdog: slow loop != crash
+            loop_dt = time.monotonic() - loop_start
+            if loop_dt > 0.25:
+                print(f"[WARN] slow loop: {loop_dt:.3f}s (fx={effect_name}, mode={current_mode})", file=sys.stderr)
 
     finally:
         try:
             if bt_in is not None:
                 bt_in.stop()
-        except Exception:
-            pass
+        except Exception as e:
+            log_exc("finally.bt_in.stop()", e)
 
         try:
             mic_stream.stop()
             mic_stream.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log_exc("finally.mic_stream.close()", e)
 
         try:
             leds.clear()
             leds.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log_exc("finally.leds.close()", e)
 
         try:
             ui.close()
-        except Exception:
-            pass
+        except Exception as e:
+            log_exc("finally.ui.close()", e)
 
 
 if __name__ == "__main__":
