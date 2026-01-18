@@ -1,9 +1,10 @@
 import numpy as np
 import colorsys
 
-def XY(x, y, w=16):
-    # raster: lewo->prawo, dół->góra (y=0 dół)
-    return y * w + x
+def XY(x, y, w=16, h=16):
+    # obrót 180°: (x,y) -> (w-1-x, h-1-y)
+    return (h - 1 - y) * w + (w - 1 - x)
+
 
 class BarsEffect:
     """
