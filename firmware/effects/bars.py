@@ -96,49 +96,71 @@ class BarsEffect:
         self._y_v = (self.hsv_v + t * self.y_v_boost).astype(np.float32)
         self._y_v = np.clip(self._y_v, 0.0, 1.0)
 
-    def _bands_1250hz_from_mag2(self, mag2: np.ndarray, sr: int, nfft: int) -> np.ndarray:
-        nyq = sr * 0.5
-        fmax = min(self.fmax, nyq)
-        if fmax <= 0:
+    def _bands_1250hz_from_mag2(self, mag2, sr, nfft):
+        import numpy as np
+
+        # ---- normalize mag2 to 1D numpy array ----
+        if mag2 is None:
             return np.zeros(self.w, dtype=np.float32)
 
-        hz_per_bin = sr / float(nfft)
+        mag2 = np.asarray(mag2)
 
-        band_pow = np.zeros(self.w, dtype=np.float32)
+        if mag2.ndim == 0:
+            return np.zeros(self.w, dtype=np.float32)
+
+        if mag2.ndim > 1:
+            mag2 = mag2.reshape(-1)
+
+        n = int(mag2.shape[0])
+        if n <= 2:
+            return np.zeros(self.w, dtype=np.float32)
+
+        # SAFE fallback: map spectrum bins -> self.w bands linearly
+        vals = np.zeros(self.w, dtype=np.float32)
+        edges = np.linspace(0, n - 1, self.w + 1).astype(int)
+
         for i in range(self.w):
-            lo_hz = i * self.band_hz
-            hi_hz = min((i + 1) * self.band_hz, fmax)
-
-            lo = int(np.floor(lo_hz / hz_per_bin))
-            hi = int(np.floor(hi_hz / hz_per_bin))
-
-            lo = max(1, lo)  # bez DC
-            hi = min(hi, mag2.shape[0] - 1)
-
+            lo = int(edges[i])
+            hi = int(edges[i + 1])
             if hi <= lo:
-                band_pow[i] = 0.0
-            else:
-                band_pow[i] = float(np.mean(mag2[lo:hi]))
+                hi = min(lo + 1, n - 1)
+            lo = max(lo, 0)
+            hi = min(hi, n - 1)
 
-        band_db = 10.0 * np.log10(band_pow + 1e-12).astype(np.float32)
+            seg = mag2[lo:hi + 1]
+            vals[i] = float(np.mean(seg)) if seg.size else 0.0
 
-        vals = (band_db - self.NOISE_FLOOR_DB) / self.RANGE_DB
-        vals = np.clip(vals, 0.0, 1.0)
-        return vals
+        # normalize to 0..1 in a stable way (optional but helps)
+        # If mag2 is already normalized, this won't hurt much.
+        mx = float(np.max(vals)) if vals.size else 0.0
+        if mx > 1e-12:
+            vals = vals / mx
+
+        return np.clip(vals, 0.0, 1.0)
+
+
 
     def update(self, features, dt, params=None):
         if params is None:
             params = {}
 
-        intensity = float(params.get("intensity", 1.0))  # tylko wysokość
-        sr = int(features.get("samplerate", 44100))
+        intensity = float(params.get("intensity", 1.0))
+
+        sr = int(features.get("samplerate", features.get("sr", 44100)))
         nfft = int(features.get("nfft", 1024))
         rms = float(features.get("rms", 0.0))
         dt = float(dt) if dt else 0.02
 
         silent = (rms < self.rms_gate)
 
-        mag2 = features.get("mag", None)
+        # --- prefer mag2, fallback mag->mag^2 ---
+        mag2 = features.get("mag2", None)
+        if mag2 is None:
+            mag = features.get("mag", None)
+            if mag is not None:
+                mag = np.asarray(mag, dtype=np.float32)
+                mag2 = mag * mag  # convert amplitude->power
+
         if mag2 is not None:
             mag2 = np.asarray(mag2, dtype=np.float32)
             vals = self._bands_1250hz_from_mag2(mag2, sr, nfft)
@@ -146,13 +168,18 @@ class BarsEffect:
             bands = features.get("bands", None)
             if bands is None:
                 return [(0, 0, 0)] * (self.w * self.h)
-            bands = np.asarray(bands, dtype=np.float32)
+
+            bands = np.asarray(bands, dtype=np.float32).reshape(-1)
+
+            # map bands -> self.w
             if bands.shape[0] != self.w:
-                xi = np.linspace(0, bands.shape[0] - 1, self.w)
+                xi = np.linspace(0, max(0, bands.shape[0] - 1), self.w)
                 vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
             else:
-                vals = bands
+                vals = bands.astype(np.float32)
+
             vals = np.clip(vals, 0.0, 1.0)
+
 
         # jeśli cisza: target=0, ale opadanie zostaje
         if silent:
