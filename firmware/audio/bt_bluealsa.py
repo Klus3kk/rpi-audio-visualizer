@@ -1,153 +1,106 @@
 # firmware/audio/bt_bluealsa.py
+# Read BT A2DP audio via BlueALSA using arecord (raw PCM) and optional playback via bluealsa-aplay.
+
 import os
-import re
 import subprocess
 import threading
-from typing import Optional
-
 import numpy as np
-
-try:
-    import sounddevice as sd
-except Exception:
-    sd = None
-
-
-def _run_cmd_lines(cmd) -> str:
-    try:
-        p = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
-        return p.stdout or ""
-    except Exception:
-        return ""
-
-
-def detect_bluealsa_dev_addr(prefer_addr: Optional[str] = None) -> Optional[str]:
-    env_addr = os.environ.get("VIS_BT_ADDR", "").strip()
-    if env_addr:
-        return env_addr
-    if prefer_addr:
-        return prefer_addr
-
-    out = _run_cmd_lines(["bluealsa-aplay", "-L"])
-    m = re.search(r"DEV=([0-9A-Fa-f:]{17})", out)
-    if m:
-        return m.group(1).upper()
-    return None
 
 
 class BlueAlsaInput:
-    """
-    BT A2DP capture via BlueALSA:
-      arecord -D bluealsa:DEV=..,PROFILE=a2dp -f S16_LE -c2 -r44100 -t raw
-
-    Optionally plays audio to local speakers using sounddevice OutputStream.
-    """
-
     def __init__(
         self,
-        *,
-        bt_addr: Optional[str] = None,
+        bt_addr: str | None,
         rate: int = 44100,
         channels: int = 2,
         chunk_frames: int = 1024,
-        playback: bool = True,
-        out_device: Optional[int] = None,
+        playback: bool = False,
+        out_pcm: str | None = None,   # e.g. "hdmi:CARD=vc4hdmi0,DEV=0"
     ):
+        self.bt_addr = bt_addr or os.environ.get("VIS_BT_ADDR")  # możesz ustawić env jak chcesz
         self.rate = int(rate)
         self.channels = int(channels)
         self.chunk_frames = int(chunk_frames)
-        self.playback = bool(playback and sd is not None)
-        self.out_device = out_device
+        self.playback = bool(playback)
+        self.out_pcm = out_pcm
 
-        self.bt_addr = detect_bluealsa_dev_addr(bt_addr)
-        self._proc: Optional[subprocess.Popen] = None
-        self._out = None
+        self._arec: subprocess.Popen | None = None
+        self._aplay: subprocess.Popen | None = None
         self._lock = threading.Lock()
-        self._alive = False
 
     def start(self):
-        if not self.bt_addr:
-            raise RuntimeError("BlueALSA: no BT address detected. Set VIS_BT_ADDR or pass bt_addr.")
-
-        dev = f"bluealsa:DEV={self.bt_addr},PROFILE=a2dp"
-        cmd = [
-            "arecord",
-            "-D", dev,
-            "-f", "S16_LE",
-            "-c", str(self.channels),
-            "-r", str(self.rate),
-            "-t", "raw",
-        ]
-
-        self._proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=0)
-        if not self._proc.stdout:
-            raise RuntimeError("BlueALSA: arecord stdout missing")
-
-        if self.playback:
-            self._out = sd.OutputStream(
-                samplerate=self.rate,
-                channels=self.channels,
-                dtype="float32",
-                device=self.out_device,
-                blocksize=self.chunk_frames,
-            )
-            self._out.start()
-
         with self._lock:
-            self._alive = True
+            if self._arec is not None:
+                return
+            if not self.bt_addr:
+                raise RuntimeError("BlueAlsaInput: bt_addr is None (set VIS_BT_ADDR or pass bt_addr)")
+
+            # CAPTURE from bluealsa via arecord
+            # NOTE: quotes are handled by passing args list
+            dev = f"bluealsa:DEV={self.bt_addr},PROFILE=a2dp"
+            fmt = "S16_LE"
+
+            self._arec = subprocess.Popen(
+                [
+                    "arecord",
+                    "-D", dev,
+                    "-f", fmt,
+                    "-c", str(self.channels),
+                    "-r", str(self.rate),
+                    "-t", "raw",
+                ],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                bufsize=0,
+            )
+            if self._arec.stdout is None:
+                raise RuntimeError("BlueAlsaInput: arecord has no stdout")
+
+            # Optional: PLAY to ALSA output using bluealsa-aplay (acts like "speaker")
+            if self.playback:
+                cmd = ["bluealsa-aplay", "--profile-a2dp"]
+                if self.out_pcm:
+                    cmd += ["-D", self.out_pcm]
+                cmd += [self.bt_addr]
+                self._aplay = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
 
     def stop(self):
         with self._lock:
-            self._alive = False
-
-        try:
-            if self._out is not None:
-                self._out.stop()
-                self._out.close()
-        except Exception:
-            pass
-        self._out = None
-
-        try:
-            if self._proc is not None:
-                self._proc.terminate()
-        except Exception:
-            pass
-
-        try:
-            if self._proc is not None:
-                self._proc.wait(timeout=1.0)
-        except Exception:
-            pass
-
-        self._proc = None
+            for p in (self._arec, self._aplay):
+                if p is None:
+                    continue
+                try:
+                    p.terminate()
+                except Exception:
+                    pass
+            self._arec = None
+            self._aplay = None
 
     def is_running(self) -> bool:
         with self._lock:
-            return self._alive
+            return self._arec is not None and (self._arec.poll() is None)
 
     def read_mono_f32(self) -> np.ndarray:
+        # returns mono float32 of length chunk_frames
         with self._lock:
-            ok = self._alive and (self._proc is not None) and (self._proc.stdout is not None)
-        if not ok:
-            return np.zeros(self.chunk_frames, dtype=np.float32)
+            p = self._arec
+            if p is None or p.stdout is None or p.poll() is not None:
+                return np.zeros(self.chunk_frames, dtype=np.float32)
 
-        bytes_per_frame = 2 * self.channels  # S16_LE
-        need = self.chunk_frames * bytes_per_frame
+            need_samples = self.chunk_frames * self.channels
+            need_bytes = need_samples * 2  # S16_LE
 
-        raw = self._proc.stdout.read(need)  # type: ignore[union-attr]
-        if not raw or len(raw) < need:
-            return np.zeros(self.chunk_frames, dtype=np.float32)
+            buf = p.stdout.read(need_bytes)
+            if not buf or len(buf) < need_bytes:
+                return np.zeros(self.chunk_frames, dtype=np.float32)
 
-        a = np.frombuffer(raw, dtype=np.int16).reshape(-1, self.channels)
-        stereo = a.astype(np.float32) / 32768.0
-
-        # playback to speakers
-        if self._out is not None:
-            try:
-                self._out.write(stereo)
-            except Exception:
-                pass
-
-        mono = np.mean(stereo, axis=1)
-        return mono.astype(np.float32, copy=False)
+        x = np.frombuffer(buf, dtype=np.int16).astype(np.float32) / 32768.0
+        if self.channels > 1:
+            x = x.reshape(self.chunk_frames, self.channels).mean(axis=1)
+        else:
+            x = x[: self.chunk_frames]
+        return x

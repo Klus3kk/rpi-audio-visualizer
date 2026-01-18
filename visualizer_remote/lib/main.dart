@@ -7,16 +7,14 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:permission_handler/permission_handler.dart';
 
-// ===================== BLE UUIDs (OPCJA B) =====================
-// Jeden serwis + jedna charakterystyka CMD (write) + opcjonalna STATE (notify).
+// ===================== BLE UUIDs =====================
 const String kDeviceName = 'Visualizer';
 
 const String kSvc = '12345678-1234-5678-1234-56789abcdef0';
 const String kCmd = '12345678-1234-5678-1234-56789abcdef9';   // WRITE
-const String kState = '12345678-1234-5678-1234-56789abcdef8'; // NOTIFY (opcjonalne)
+const String kState = '12345678-1234-5678-1234-56789abcdef8'; // READ/NOTIFY (opcjonalne)
 
 // ===================== UI theme =====================
-
 class Retro {
   static const bg = Color(0xFF101114);
   static const panel = Color(0xFF1B1D22);
@@ -57,7 +55,6 @@ class VisualizerRemoteApp extends StatelessWidget {
 }
 
 // ===================== Permissions =====================
-
 class PermissionGate extends StatefulWidget {
   const PermissionGate({super.key});
 
@@ -81,7 +78,6 @@ class _PermissionGateState extends State<PermissionGate> {
 
   Future<bool> _hasBlePerms() async {
     if (!Platform.isAndroid) return true;
-    // Android 12+: scan/connect, <12: location bywa wymagane
     final scan = await Permission.bluetoothScan.isGranted;
     final conn = await Permission.bluetoothConnect.isGranted;
     if (scan && conn) return true;
@@ -152,7 +148,6 @@ class _PermissionGateState extends State<PermissionGate> {
 }
 
 // ===================== Data model =====================
-
 class VizState {
   final String mode; // mic | bt
   final String effect;
@@ -160,6 +155,9 @@ class VizState {
   final double intensity;
   final double gain;
   final double smoothing;
+  final String deviceAddr; // MAC for BlueALSA A2DP (optional but recommended)
+  final String artist;
+  final String title;
 
   const VizState({
     required this.mode,
@@ -168,6 +166,9 @@ class VizState {
     required this.intensity,
     required this.gain,
     required this.smoothing,
+    required this.deviceAddr,
+    required this.artist,
+    required this.title,
   });
 
   factory VizState.initial() => const VizState(
@@ -177,6 +178,9 @@ class VizState {
         intensity: 0.75,
         gain: 1.0,
         smoothing: 0.65,
+        deviceAddr: 'BC:A0:80:E0:B9:4E', // ustaw domyślnie swój telefon (możesz zmienić w UI)
+        artist: '',
+        title: '',
       );
 
   VizState copyWith({
@@ -186,6 +190,9 @@ class VizState {
     double? intensity,
     double? gain,
     double? smoothing,
+    String? deviceAddr,
+    String? artist,
+    String? title,
   }) {
     return VizState(
       mode: mode ?? this.mode,
@@ -194,6 +201,9 @@ class VizState {
       intensity: intensity ?? this.intensity,
       gain: gain ?? this.gain,
       smoothing: smoothing ?? this.smoothing,
+      deviceAddr: deviceAddr ?? this.deviceAddr,
+      artist: artist ?? this.artist,
+      title: title ?? this.title,
     );
   }
 
@@ -204,6 +214,11 @@ class VizState {
         'intensity': intensity,
         'gain': gain,
         'smoothing': smoothing,
+        'device_addr': deviceAddr,
+        'artist': artist,
+        'title': title,
+        'connected': true,
+        'device_name': 'phone',
       };
 
   static VizState fromJson(Map<String, dynamic> j, {VizState? fallback}) {
@@ -221,12 +236,14 @@ class VizState {
       intensity: d(j['intensity'], fb.intensity).clamp(0.0, 1.0),
       gain: d(j['gain'], fb.gain).clamp(0.1, 6.0),
       smoothing: d(j['smoothing'], fb.smoothing).clamp(0.0, 0.95),
+      deviceAddr: (j['device_addr'] ?? fb.deviceAddr).toString(),
+      artist: (j['artist'] ?? fb.artist).toString(),
+      title: (j['title'] ?? fb.title).toString(),
     );
   }
 }
 
-// ===================== BLE Controller (throttled scan, one cmd char) =====================
-
+// ===================== BLE Controller =====================
 enum ConnStatus { idle, scanning, connecting, connected, error }
 
 class BleController {
@@ -241,7 +258,6 @@ class BleController {
   final ValueNotifier<ConnStatus> status = ValueNotifier(ConnStatus.idle);
   final ValueNotifier<String?> error = ValueNotifier(null);
 
-  // stan UI (lokalny) + stan z Pi (opcjonalnie)
   final ValueNotifier<VizState> desired = ValueNotifier(VizState.initial());
   final ValueNotifier<VizState> remote = ValueNotifier(VizState.initial());
 
@@ -251,7 +267,6 @@ class BleController {
   Future<void> scanAndConnect({Duration timeout = const Duration(seconds: 6)}) async {
     if (_scanInFlight) return;
 
-    // throttle: nie częściej niż co 2 sek
     final now = DateTime.now();
     if (now.difference(_lastScanAt) < const Duration(seconds: 2)) return;
     _lastScanAt = now;
@@ -264,7 +279,6 @@ class BleController {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
 
-    // skan 1x, koniec
     await FlutterBluePlus.startScan(timeout: timeout);
 
     _scanSub?.cancel();
@@ -273,8 +287,10 @@ class BleController {
         final name = r.device.platformName;
         final matchesName = name == kDeviceName;
 
-        // Alternatywa: filtrowanie po service UUID (jeśli nazwa bywa pusta)
-        final advUuids = r.advertisementData.serviceUuids.map((e) => e.toLowerCase()).toList();
+        // FIX: Guid -> String
+        final advUuids = r.advertisementData.serviceUuids
+            .map((g) => g.toString().toLowerCase())
+            .toList();
         final matchesSvc = advUuids.contains(kSvc.toLowerCase());
 
         if (matchesName || matchesSvc) {
@@ -287,7 +303,6 @@ class BleController {
       }
     });
 
-    // po timeout skanu, jeśli nie znaleziono:
     Future.delayed(timeout + const Duration(milliseconds: 200), () {
       if (status.value == ConnStatus.scanning) {
         status.value = ConnStatus.error;
@@ -304,9 +319,7 @@ class BleController {
 
     try {
       await d.connect(autoConnect: false, timeout: const Duration(seconds: 8));
-    } catch (_) {
-      // jeśli już połączony / race, spróbujemy i tak discover
-    }
+    } catch (_) {}
 
     _connSub?.cancel();
     _connSub = d.connectionState.listen((s) {
@@ -322,7 +335,6 @@ class BleController {
       await _enableNotifyIfPresent();
       status.value = ConnStatus.connected;
 
-      // po połączeniu: wyślij pełny stan "desired" jako init
       await sendFullState(desired.value);
     } catch (e) {
       status.value = ConnStatus.error;
@@ -402,8 +414,6 @@ class BleController {
     if (ch == null) return;
 
     final payload = utf8.encode(jsonEncode(patch));
-
-    // prefer withoutResponse jeśli charakterystyka to wspiera (mniej lag)
     final canNoResp = ch.properties.writeWithoutResponse;
     await ch.write(payload, withoutResponse: canNoResp);
   }
@@ -414,7 +424,6 @@ class BleController {
 }
 
 // ===================== UI =====================
-
 class Root extends StatefulWidget {
   const Root({super.key});
   @override
@@ -428,7 +437,6 @@ class _RootState extends State<Root> {
   @override
   void initState() {
     super.initState();
-    // autoconnect raz po starcie (bez pętli)
     ble.scanAndConnect();
   }
 
@@ -512,189 +520,218 @@ class _RootState extends State<Root> {
             return ValueListenableBuilder<VizState>(
               valueListenable: ble.desired,
               builder: (context, desired, ___) {
-                return ValueListenableBuilder<VizState>(
-                  valueListenable: ble.remote,
-                  builder: (context, remote, ____) {
-                    final connected = st == ConnStatus.connected;
-                    final statusColor = connected ? Retro.ok : (st == ConnStatus.error ? Retro.bad : Retro.yellow);
-                    final statusText = switch (st) {
-                      ConnStatus.idle => 'IDLE',
-                      ConnStatus.scanning => 'SCANNING',
-                      ConnStatus.connecting => 'CONNECTING',
-                      ConnStatus.connected => 'CONNECTED',
-                      ConnStatus.error => 'ERROR',
-                    };
-
-                    // jeśli Pi wysyła state notify, pokaż remote. Jak nie, i tak UI działa jako "desired".
-                    final showState = remote;
-
-                    return Scaffold(
-                      appBar: AppBar(
-                        title: const Text('VISUALIZER'),
-                        backgroundColor: Retro.panel,
+                return Scaffold(
+                  appBar: AppBar(
+                    title: const Text('VISUALIZER'),
+                    backgroundColor: Retro.panel,
+                  ),
+                  body: ListView(
+                    padding: const EdgeInsets.all(12),
+                    children: [
+                      CutPanel(
+                        cut: 10,
+                        child: Row(
+                          children: [
+                            Container(
+                              width: 10,
+                              height: 10,
+                              color: st == ConnStatus.connected
+                                  ? Retro.ok
+                                  : (st == ConnStatus.error ? Retro.bad : Retro.yellow),
+                            ),
+                            const SizedBox(width: 10),
+                            Expanded(child: _plate('LINK: ${st.name}', accent: Retro.yellow)),
+                            const SizedBox(width: 8),
+                            Expanded(child: _plate('MODE: ${desired.mode}', accent: Retro.yellow)),
+                            const SizedBox(width: 8),
+                            Expanded(child: _plate('FX: ${desired.effect}', accent: Retro.yellow)),
+                          ],
+                        ),
                       ),
-                      body: ListView(
-                        padding: const EdgeInsets.all(12),
-                        children: [
-                          CutPanel(
-                            cut: 10,
-                            child: Row(
+
+                      if (err != null) ...[
+                        const SizedBox(height: 10),
+                        CutPanel(cut: 10, child: Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 18))),
+                      ],
+
+                      const SizedBox(height: 12),
+
+                      CutPanel(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('CONNECTION', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                            const SizedBox(height: 10),
+                            Row(
                               children: [
-                                Container(width: 10, height: 10, color: statusColor),
+                                Expanded(
+                                  child: _btn(
+                                    (st == ConnStatus.scanning) ? 'SCANNING…' : 'CONNECT',
+                                    onPressed: (st == ConnStatus.scanning || st == ConnStatus.connecting)
+                                        ? null
+                                        : () => ble.scanAndConnect(),
+                                  ),
+                                ),
                                 const SizedBox(width: 10),
                                 Expanded(
-                                  child: _plate('LINK: $statusText', accent: statusColor),
+                                  child: _btn(
+                                    'DISCONNECT',
+                                    onPressed: (st == ConnStatus.connected) ? () => ble.disconnect() : null,
+                                    fg: Colors.white70,
+                                    border: Colors.white24,
+                                  ),
                                 ),
-                                const SizedBox(width: 8),
-                                Expanded(child: _plate('MODE: ${showState.mode}', accent: Retro.yellow)),
-                                const SizedBox(width: 8),
-                                Expanded(child: _plate('FX: ${showState.effect}', accent: Retro.yellow)),
                               ],
-                            ),
-                          ),
-
-                          if (err != null) ...[
-                            const SizedBox(height: 10),
-                            CutPanel(
-                              cut: 10,
-                              child: Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 18)),
                             ),
                           ],
-
-                          const SizedBox(height: 12),
-
-                          CutPanel(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('CONNECTION', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                                const SizedBox(height: 10),
-                                Row(
-                                  children: [
-                                    Expanded(
-                                      child: _btn(
-                                        st == ConnStatus.scanning ? 'SCANNING…' : 'CONNECT',
-                                        onPressed: (st == ConnStatus.scanning || st == ConnStatus.connecting)
-                                            ? null
-                                            : () => ble.scanAndConnect(),
-                                        fg: Retro.yellow,
-                                        border: Retro.yellow,
-                                      ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    Expanded(
-                                      child: _btn(
-                                        'DISCONNECT',
-                                        onPressed: connected ? () => ble.disconnect() : null,
-                                        fg: Colors.white70,
-                                        border: Colors.white24,
-                                      ),
-                                    ),
-                                  ],
-                                ),
-                              ],
-                            ),
-                          ),
-
-                          const SizedBox(height: 12),
-
-                          CutPanel(
-                            child: Column(
-                              crossAxisAlignment: CrossAxisAlignment.start,
-                              children: [
-                                Text('MODE', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                                const SizedBox(height: 10),
-
-                                SegmentedButton<String>(
-                                  segments: const [
-                                    ButtonSegment(value: 'mic', label: Text('MIC')),
-                                    ButtonSegment(value: 'bt', label: Text('BT')),
-                                  ],
-                                  selected: {desired.mode},
-                                  onSelectionChanged: (set) async {
-                                    final m = set.first;
-                                    final next = desired.copyWith(mode: m);
-                                    ble.desired.value = next;
-
-                                    if (connected) {
-                                      await ble.sendPatch({'mode': m});
-                                    }
-                                  },
-                                ),
-
-                                const SizedBox(height: 12),
-
-                                Text('EFFECT', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                                const SizedBox(height: 10),
-                                DropdownButtonFormField<String>(
-                                  value: desired.effect,
-                                  items: const [
-                                    DropdownMenuItem(value: 'bars', child: Text('BARS')),
-                                    DropdownMenuItem(value: 'vu', child: Text('VU')),
-                                    DropdownMenuItem(value: 'scope', child: Text('SCOPE')),
-                                    DropdownMenuItem(value: 'radial', child: Text('RADIAL')),
-                                    DropdownMenuItem(value: 'fire', child: Text('FIRE')),
-                                    DropdownMenuItem(value: 'wave', child: Text('WAVE')),
-                                  ],
-                                  onChanged: (v) async {
-                                    if (v == null) return;
-                                    final next = desired.copyWith(effect: v);
-                                    ble.desired.value = next;
-
-                                    if (connected) {
-                                      await ble.sendPatch({'effect': v});
-                                    }
-                                  },
-                                  decoration: const InputDecoration(border: OutlineInputBorder()),
-                                ),
-
-                                const SizedBox(height: 12),
-
-                                Text('LEVELS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                                const SizedBox(height: 10),
-
-                                _slider('Intensity', desired.intensity, 0, 1, (v) {
-                                  ble.desired.value = desired.copyWith(intensity: v);
-                                  _debounced(const Duration(milliseconds: 120), () {
-                                    if (connected) ble.sendPatch({'intensity': v});
-                                  });
-                                }),
-
-                                _slider('Brightness', desired.brightness, 0, 1, (v) {
-                                  ble.desired.value = desired.copyWith(brightness: v);
-                                  _debounced(const Duration(milliseconds: 120), () {
-                                    if (connected) ble.sendPatch({'brightness': v});
-                                  });
-                                }),
-
-                                _slider('Gain', desired.gain, 0.1, 6, (v) {
-                                  ble.desired.value = desired.copyWith(gain: v);
-                                  _debounced(const Duration(milliseconds: 120), () {
-                                    if (connected) ble.sendPatch({'gain': v});
-                                  });
-                                }),
-
-                                _slider('Smoothing', desired.smoothing, 0, 0.95, (v) {
-                                  ble.desired.value = desired.copyWith(smoothing: v);
-                                  _debounced(const Duration(milliseconds: 120), () {
-                                    if (connected) ble.sendPatch({'smoothing': v});
-                                  });
-                                }),
-
-                                const SizedBox(height: 6),
-                                Text(
-                                  connected
-                                      ? 'Sending patches as JSON to CMD characteristic.'
-                                      : 'Not connected. Controls update local state only.',
-                                  style: const TextStyle(color: Colors.white60, fontSize: 16),
-                                ),
-                              ],
-                            ),
-                          ),
-                        ],
+                        ),
                       ),
-                    );
-                  },
+
+                      const SizedBox(height: 12),
+
+                      CutPanel(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('BT SETTINGS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: TextEditingController(text: desired.deviceAddr),
+                              decoration: const InputDecoration(
+                                labelText: 'PHONE MAC (A2DP / BlueALSA)',
+                                border: OutlineInputBorder(),
+                                hintText: 'BC:A0:80:E0:B9:4E',
+                              ),
+                              onChanged: (v) {
+                                ble.desired.value = desired.copyWith(deviceAddr: v.trim());
+                                _debounced(const Duration(milliseconds: 300), () {
+                                  if (ble.status.value == ConnStatus.connected) {
+                                    ble.sendPatch({'device_addr': v.trim()});
+                                  }
+                                });
+                              },
+                            ),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: TextEditingController(text: desired.artist),
+                              decoration: const InputDecoration(labelText: 'ARTIST (optional)', border: OutlineInputBorder()),
+                              onChanged: (v) {
+                                ble.desired.value = desired.copyWith(artist: v);
+                                _debounced(const Duration(milliseconds: 300), () {
+                                  if (ble.status.value == ConnStatus.connected) ble.sendPatch({'artist': v});
+                                });
+                              },
+                            ),
+                            const SizedBox(height: 10),
+                            TextField(
+                              controller: TextEditingController(text: desired.title),
+                              decoration: const InputDecoration(labelText: 'TITLE (optional)', border: OutlineInputBorder()),
+                              onChanged: (v) {
+                                ble.desired.value = desired.copyWith(title: v);
+                                _debounced(const Duration(milliseconds: 300), () {
+                                  if (ble.status.value == ConnStatus.connected) ble.sendPatch({'title': v});
+                                });
+                              },
+                            ),
+                          ],
+                        ),
+                      ),
+
+                      const SizedBox(height: 12),
+
+                      CutPanel(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('MODE', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                            const SizedBox(height: 10),
+
+                            SegmentedButton<String>(
+                              segments: const [
+                                ButtonSegment(value: 'mic', label: Text('MIC')),
+                                ButtonSegment(value: 'bt', label: Text('BT')),
+                              ],
+                              selected: {desired.mode},
+                              onSelectionChanged: (set) async {
+                                final m = set.first;
+                                final next = desired.copyWith(mode: m);
+                                ble.desired.value = next;
+
+                                if (ble.status.value == ConnStatus.connected) {
+                                  await ble.sendPatch({
+                                    'mode': m,
+                                    'device_addr': next.deviceAddr,
+                                    'artist': next.artist,
+                                    'title': next.title,
+                                    'connected': true,
+                                  });
+                                }
+                              },
+                            ),
+
+                            const SizedBox(height: 12),
+
+                            Text('EFFECT', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                            const SizedBox(height: 10),
+                            DropdownButtonFormField<String>(
+                              value: desired.effect,
+                              items: const [
+                                DropdownMenuItem(value: 'bars', child: Text('BARS')),
+                                DropdownMenuItem(value: 'vu', child: Text('VU')),
+                                DropdownMenuItem(value: 'osc', child: Text('OSC')),
+                                DropdownMenuItem(value: 'pulse', child: Text('PULSE')),
+                                DropdownMenuItem(value: 'fire', child: Text('FIRE')),
+                                DropdownMenuItem(value: 'wave', child: Text('WAVE')),
+                              ],
+                              onChanged: (v) async {
+                                if (v == null) return;
+                                final next = desired.copyWith(effect: v);
+                                ble.desired.value = next;
+
+                                if (ble.status.value == ConnStatus.connected) {
+                                  await ble.sendPatch({'effect': v});
+                                }
+                              },
+                              decoration: const InputDecoration(border: OutlineInputBorder()),
+                            ),
+
+                            const SizedBox(height: 12),
+
+                            Text('LEVELS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
+                            const SizedBox(height: 10),
+
+                            _slider('Intensity', desired.intensity, 0, 1, (v) {
+                              ble.desired.value = desired.copyWith(intensity: v);
+                              _debounced(const Duration(milliseconds: 120), () {
+                                if (ble.status.value == ConnStatus.connected) ble.sendPatch({'intensity': v});
+                              });
+                            }),
+
+                            _slider('Brightness', desired.brightness, 0, 1, (v) {
+                              ble.desired.value = desired.copyWith(brightness: v);
+                              _debounced(const Duration(milliseconds: 120), () {
+                                if (ble.status.value == ConnStatus.connected) ble.sendPatch({'brightness': v});
+                              });
+                            }),
+
+                            _slider('Gain', desired.gain, 0.1, 6, (v) {
+                              ble.desired.value = desired.copyWith(gain: v);
+                              _debounced(const Duration(milliseconds: 120), () {
+                                if (ble.status.value == ConnStatus.connected) ble.sendPatch({'gain': v});
+                              });
+                            }),
+
+                            _slider('Smoothing', desired.smoothing, 0, 0.95, (v) {
+                              ble.desired.value = desired.copyWith(smoothing: v);
+                              _debounced(const Duration(milliseconds: 120), () {
+                                if (ble.status.value == ConnStatus.connected) ble.sendPatch({'smoothing': v});
+                              });
+                            }),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
                 );
               },
             );
@@ -705,8 +742,7 @@ class _RootState extends State<Root> {
   }
 }
 
-// ===================== Cut Panel + bevel (no rounded borders) =====================
-
+// ===================== Cut Panel + bevel =====================
 class CutPanel extends StatelessWidget {
   final Widget child;
   final double cut;

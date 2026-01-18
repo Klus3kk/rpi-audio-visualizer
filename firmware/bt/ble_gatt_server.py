@@ -1,6 +1,6 @@
 # firmware/bt/ble_gatt_server.py
 # BLE GATT server for Visualizer (BlueZ + D-Bus)
-# Any device can connect. JSON control via WRITE characteristic.
+# JSON control via WRITE characteristic.
 
 import json
 import threading
@@ -16,56 +16,46 @@ GATT_SERVICE_IFACE = "org.bluez.GattService1"
 GATT_CHRC_IFACE = "org.bluez.GattCharacteristic1"
 LE_ADV_IFACE = "org.bluez.LEAdvertisement1"
 
+# D-Bus bus name MUST be like "com.something"
+BUS_NAME = "com.visualizer.rpi"
+
 SVC_UUID   = "12345678-1234-5678-1234-56789abcdef0"
 CMD_UUID   = "12345678-1234-5678-1234-56789abcdef9"
 STATE_UUID = "12345678-1234-5678-1234-56789abcdef8"
 
-APP_PATH = "/visualizer"
+APP_PATH = "/com/visualizer"
 SVC_PATH = APP_PATH + "/service0"
 CMD_PATH = SVC_PATH + "/char0"
 STATE_PATH = SVC_PATH + "/char1"
-ADV_PATH = "/visualizer/adv0"
+ADV_PATH = APP_PATH + "/adv0"
 
 
 # ===================== SHARED STATE =====================
 
 class SharedState:
-    """
-    Shared state between BLE and main loop.
-
-    NOTE:
-    - accept patches for known keys only (prevents junk)
-    - includes BT metadata fields for LCD display in BT mode
-    """
     def __init__(self):
         self.lock = threading.Lock()
         self.state = {
-            # control
-            "mode": "mic",            # mic|bt
+            "mode": "mic",
             "effect": "bars",
             "brightness": 0.55,
             "intensity": 0.75,
             "gain": 1.0,
             "smoothing": 0.65,
-            "color_mode": "auto",     # auto|rainbow|mono  (jeśli apka zacznie wysyłać)
 
-            # bt metadata (for LCD)
-            "connected": False,
+            # optional metadata (apka może wysyłać)
             "device_name": "",
             "device_addr": "",
             "artist": "",
             "title": "",
+            "connected": False,
         }
-
-        # whitelist
-        self.allowed = set(self.state.keys())
 
     def update(self, patch: dict):
         with self.lock:
             for k, v in patch.items():
-                if k not in self.allowed:
-                    continue
-                self.state[k] = v
+                if k in self.state:
+                    self.state[k] = v
 
     def snapshot(self):
         with self.lock:
@@ -81,9 +71,6 @@ class Application:
     def __init__(self):
         self.path = APP_PATH
         self.services = [Service()]
-
-    def get_path(self):
-        return self.path
 
     def GetManagedObjects(self):
         objs = {}
@@ -119,7 +106,7 @@ class CmdCharacteristic:
 
     def WriteValue(self, value, options):
         try:
-            txt = bytes(value).decode("utf-8")
+            txt = bytes(value).decode("utf-8", errors="ignore")
             patch = json.loads(txt)
             if isinstance(patch, dict):
                 SHARED.update(patch)
@@ -137,56 +124,21 @@ class CmdCharacteristic:
 
 
 class StateCharacteristic:
-    """
-    Optional notify characteristic. Your app already supports it (kState).
-    We implement Notify via PropertiesChanged on org.freedesktop.DBus.Properties.
-    """
     def __init__(self):
         self.path = STATE_PATH
         self.uuid = STATE_UUID
-        self.flags = ["notify", "read"]
-        self._notifying = False
-        self._bus = None
-        self._last_json = ""
-
-    def _emit_changed(self):
-        if not self._notifying or self._bus is None:
-            return
-        try:
-            # properties changed signal
-            props_iface = "org.freedesktop.DBus.Properties"
-            chrc_iface = GATT_CHRC_IFACE
-            val = list(json.dumps(SHARED.snapshot()).encode("utf-8"))
-            self._bus.con.signal(
-                self.path,
-                props_iface,
-                "PropertiesChanged",
-                "sa{sv}as",
-                (chrc_iface, {"Value": val}, []),
-            )
-        except Exception:
-            pass
+        self.flags = ["read", "notify"]
 
     def ReadValue(self, options):
         data = json.dumps(SHARED.snapshot()).encode("utf-8")
         return list(data)
 
     def StartNotify(self):
-        self._notifying = True
-        # start periodic notify every 500ms (lightweight)
-        def tick():
-            if not self._notifying:
-                return False
-            snap = SHARED.snapshot()
-            js = json.dumps(snap, separators=(",", ":"))
-            if js != self._last_json:
-                self._last_json = js
-                self._emit_changed()
-            return True
-        GLib.timeout_add(500, tick)
+        # notify jest opcjonalne; jeśli nie implementujesz push, to i tak OK
+        pass
 
     def StopNotify(self):
-        self._notifying = False
+        pass
 
     def get_props(self):
         return {
@@ -210,14 +162,11 @@ class Advertisement:
             }
         }
 
-    def get_path(self):
-        return self.path
+    def Release(self):
+        pass
 
     def get_props(self):
         return self.props
-
-    def Release(self):
-        pass
 
 
 # ===================== SERVER START =====================
@@ -228,7 +177,7 @@ def _find_adapter(bus):
     for path, ifaces in objects.items():
         if LE_ADV_MANAGER_IFACE in ifaces and GATT_MANAGER_IFACE in ifaces:
             return path
-    raise RuntimeError("BLE adapter not found")
+    raise RuntimeError("BLE adapter not found (no LEAdvertisingManager1/GattManager1)")
 
 
 def start_ble():
@@ -236,17 +185,20 @@ def start_ble():
     adapter = _find_adapter(bus)
 
     app = Application()
+    svc = app.services[0]
+    cmd = svc.characteristics[0]
+    stc = svc.characteristics[1]
     adv = Advertisement()
 
-    # publish objects
-    bus.publish(APP_PATH, app)
-    bus.publish(SVC_PATH, app.services[0])
-    for c in app.services[0].characteristics:
-        # attach bus for notify characteristic
-        if isinstance(c, StateCharacteristic):
-            c._bus = bus
-        bus.publish(c.path, c)
-    bus.publish(ADV_PATH, adv)
+    # IMPORTANT: first argument is BUS_NAME, not object path
+    bus.publish(
+        BUS_NAME,
+        (APP_PATH, app),
+        (SVC_PATH, svc),
+        (CMD_PATH, cmd),
+        (STATE_PATH, stc),
+        (ADV_PATH, adv),
+    )
 
     gatt_mgr = bus.get(BLUEZ, adapter)
     adv_mgr = bus.get(BLUEZ, adapter)
@@ -254,5 +206,4 @@ def start_ble():
     gatt_mgr.RegisterApplication(APP_PATH, {})
     adv_mgr.RegisterAdvertisement(ADV_PATH, {})
 
-    loop = GLib.MainLoop()
-    loop.run()
+    GLib.MainLoop().run()

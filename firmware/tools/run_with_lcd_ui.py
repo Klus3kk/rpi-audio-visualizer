@@ -58,7 +58,6 @@ def push_frame(leds: Esp32SerialDriver, frame):
 
 
 def get_state():
-    # atomic snapshot from BLE shared
     try:
         return SHARED.snapshot()
     except Exception:
@@ -82,14 +81,13 @@ def main():
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
-        
         rotate=270,
         mirror=True,              # jeśli lustrzane -> False
-        panel_invert=False,        # jeśli kolory złe -> False
+        panel_invert=True,        # jeśli kolory złe -> False
         dim=0.90,
         font_size=13,
         font_size_big=18,
-        accent=(30, 140, 255),
+        accent=(30, 140, 255),    # BLUE
         bg=(0, 0, 0),
     )
 
@@ -108,8 +106,8 @@ def main():
     )
     mic_stream.start()
 
-    # ---- BT (lazy start) ----
-    bt_in = None
+    # ---- BT (lazy) ----
+    bt_in: BlueAlsaInput | None = None
 
     # ---- Effects ----
     effects = make_effects()
@@ -126,10 +124,8 @@ def main():
         "glow": 0.25,
     }
 
-    # start mode = mic (wymuszenie na starcie)
-    current_mode = "mic"
+    current_mode = "mic"  # start always mic
 
-    # timers
     t_led = time.monotonic()
     t_lcd = time.monotonic()
     dt_led = 1.0 / FPS_LED
@@ -142,17 +138,17 @@ def main():
             now = time.monotonic()
             st = get_state()
 
-            # desired mode
+            # ---- desired mode
             desired_mode = str(st.get("mode", "mic")).lower()
             desired_mode = "bt" if desired_mode == "bt" else "mic"
 
-            # effect
+            # ---- effect
             desired_fx = str(st.get("effect", effect_name)).lower()
             if desired_fx in effects and desired_fx != effect_name:
                 effect_name = desired_fx
                 effect = effects[effect_name]
 
-            # params
+            # ---- params
             params["brightness"] = f01(st.get("brightness", params["brightness"]), params["brightness"])
             params["intensity"] = f01(st.get("intensity", params["intensity"]), params["intensity"])
 
@@ -169,19 +165,21 @@ def main():
             if cm in ("auto", "rainbow", "mono"):
                 params["color_mode"] = cm
 
-            # mode switch: start/stop BT pipeline
+            # ---- switch mode (start/stop BT capture)
             if desired_mode != current_mode:
                 current_mode = desired_mode
 
                 if current_mode == "bt":
+                    # bt_addr najlepiej ustaw w env VIS_BT_ADDR albo wysyłaj przez BLE jako device_addr
+                    bt_addr = str(st.get("device_addr", "")).strip() or None
                     try:
                         bt_in = BlueAlsaInput(
-                            bt_addr=None,        # autodetect; or set env VIS_BT_ADDR
+                            bt_addr=bt_addr,
                             rate=SR,
                             channels=2,
                             chunk_frames=NFFT,
-                            playback=True,       # RPi gra jako głośnik
-                            out_device=None,
+                            playback=True,
+                            out_pcm="hdmi:CARD=vc4hdmi0,DEV=0",  # zmień jeśli chcesz inne wyjście
                         )
                         bt_in.start()
                     except Exception:
@@ -194,7 +192,7 @@ def main():
                         pass
                     bt_in = None
 
-            # audio block
+            # ---- audio block
             if current_mode == "bt":
                 if bt_in is not None and bt_in.is_running():
                     x = bt_in.read_mono_f32()
@@ -207,18 +205,18 @@ def main():
                 except Exception:
                     x = np.zeros(NFFT, dtype=np.float32)
 
-            # stabilize low-end
+            # ---- stabilize low-end + gain
             x = x - float(np.mean(x))
             x = x * float(params["gain"])
 
-            # features
+            # ---- features
             try:
                 feats = fe.compute(x)
                 last_feats = feats
             except Exception:
                 feats = last_feats
 
-            # LED
+            # ---- LED
             if now - t_led >= dt_led:
                 t_led = now
                 try:
@@ -239,7 +237,7 @@ def main():
                 except Exception:
                     pass
 
-            # LCD
+            # ---- LCD
             if now - t_lcd >= dt_lcd:
                 t_lcd = now
 
