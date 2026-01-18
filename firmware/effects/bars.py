@@ -2,37 +2,34 @@ import numpy as np
 import colorsys
 
 class BarsEffect:
-    """
-    - X: pasma 0..20kHz po 1250Hz (lewo->prawo w logice)
-    - Y: wysokość (y=0 dół)
-    - Stała jasność (audio nie podbija V), audio wpływa tylko na wysokość
-    - 7 dyskretnych kolorów po X
-    - Gradient po Y (ładne wypełnienie, nie „bloki”)
-    - Opcjonalny x_map: mapuje logiczne kolumny na fizyczne (gdy taśma startuje inaczej)
-    """
-
     def __init__(
         self,
         w=16, h=16,
+
+        # reakcja
         attack=0.60,
-        decay_px_per_s=5.0,
-        peak_decay_px_per_s=2.8,
-        rms_gate=0.003,
-        gate=0.02,
+        decay_px_per_s=4.5,        # wolniej opada (czytelniej)
+        peak_decay_px_per_s=2.2,
+
+        # cisza / gate (LUŹNIEJSZE, żeby nie zerowało wszystkiego)
+        rms_gate=0.0012,
+        gate=0.010,
+
+        # pasma
         band_hz=1250.0,
         fmax=20000.0,
-        NOISE_FLOOR_DB=-85.0,
-        RANGE_DB=60.0,
+        NOISE_FLOOR_DB=-95.0,
+        RANGE_DB=75.0,
 
-        # jasność stała (bazowa) + łagodny gradient po Y
-        v_base=0.18,
-        v_top=0.32,        # jasność na górze słupka (nadal niezależna od audio)
+        # jasność stała + gradient po Y (WIDOCZNE)
+        v_base=0.22,
+        v_top=0.55,
         s=1.0,
 
-        # 7 kolorów
-        palette7_hues=(0.00, 0.08, 0.16, 0.33, 0.50, 0.66, 0.83),
+        # 7 kolorów (hue)
+        palette7_hues=(0.00, 0.07, 0.14, 0.33, 0.50, 0.66, 0.83),
 
-        # mapowanie kolumn (None = normalnie 0..15)
+        # mapowanie kolumn jeśli startuje “od środka” (na razie normalnie)
         x_map=None,
     ):
         self.w = int(w)
@@ -40,6 +37,7 @@ class BarsEffect:
 
         self.level = np.zeros(self.w, dtype=np.float32)
         self.peak  = np.zeros(self.w, dtype=np.float32)
+        self._prev_vals = np.zeros(self.w, dtype=np.float32)
 
         self.attack = float(attack)
         self.decay = float(decay_px_per_s)
@@ -56,7 +54,6 @@ class BarsEffect:
         self.v_base = float(v_base)
         self.v_top = float(v_top)
         self.s = float(s)
-
         self.palette7_hues = tuple(float(x) for x in palette7_hues)
 
         if x_map is None:
@@ -64,24 +61,16 @@ class BarsEffect:
         else:
             xm = list(x_map)
             if len(xm) != self.w:
-                raise ValueError("x_map must have length w=16")
+                raise ValueError("x_map must have length 16")
             self.x_map = xm
 
-        # band smoothing
-        self._prev_vals = np.zeros(self.w, dtype=np.float32)
+        # gradient V po Y (y=0 dół, y=15 góra)
+        t = np.linspace(0.0, 1.0, self.h, dtype=np.float32)
+        self._v_y = np.clip(self.v_base + t * (self.v_top - self.v_base), 0.0, 1.0)
 
-        # precompute V per Y (gradient)
-        if self.h > 1:
-            t = np.linspace(0.0, 1.0, self.h, dtype=np.float32)
-        else:
-            t = np.array([0.0], dtype=np.float32)
-        self._v_y = (self.v_base + t * (self.v_top - self.v_base)).astype(np.float32)
-        self._v_y = np.clip(self._v_y, 0.0, 1.0)
-
-        # precompute hue per X (7 kolorów rozciągnięte na 16 kolumn)
+        # 7 kolorów rozciągnięte na 16 kolumn
         self._hue_x = np.zeros(self.w, dtype=np.float32)
         for x in range(self.w):
-            # mapuj x do 0..6
             k = int(round((x / max(1, self.w - 1)) * 6))
             k = max(0, min(6, k))
             self._hue_x[x] = self.palette7_hues[k]
@@ -144,7 +133,7 @@ class BarsEffect:
             self._prev_vals *= 0.0
 
         # smoothing pasm
-        alpha = 0.28
+        alpha = 0.30
         vals = (1.0 - alpha) * self._prev_vals + alpha * vals
         self._prev_vals = vals
 
@@ -152,8 +141,8 @@ class BarsEffect:
         vals = vals.copy()
         vals[vals < self.gate] = 0.0
 
-        # intensity tylko na wysokość
-        vals = np.clip(vals * (0.60 + 1.40 * intensity), 0.0, 1.0)
+        # intensity -> tylko wysokość
+        vals = np.clip(vals * (0.70 + 1.30 * intensity), 0.0, 1.0)
         target = vals * (self.h - 1)
 
         fall = self.decay * dt
@@ -175,12 +164,11 @@ class BarsEffect:
 
         for x in range(self.w):
             hh = int(np.clip(np.round(self.level[x]), 0, self.h - 1))
-
-            phys_x = self.x_map[x]  # klucz do „startuje od środka”
+            phys_x = self.x_map[x]
             hue = float(self._hue_x[x])
 
-            # pełne wypełnienie + gradient po Y
-            for y in range(hh + 1):
+            # WAŻNE: start od y=0 (pierwsza warstwa), pełne wypełnienie do hh
+            for y in range(0, hh + 1):
                 v = float(self._v_y[y])
                 r, g, b = colorsys.hsv_to_rgb(hue, self.s, v)
                 frame[y * self.w + phys_x] = (int(r * 255), int(g * 255), int(b * 255))
