@@ -65,6 +65,9 @@ class LcdSt7789:
         self.spi.open(int(spi_bus), int(spi_dev))
         self.spi.max_speed_hz = int(spi_hz)
         self.spi.mode = 0
+        if self.CS is not None:
+            self.spi.no_cs = True
+
 
         # init
         self._reset()
@@ -96,11 +99,13 @@ class LcdSt7789:
 
     def _write(self, data: bytes):
         self._cs_low()
-        # chunking (stabilniej)
         CH = 4096
         for i in range(0, len(data), CH):
-            self.spi.writebytes(data[i:i+CH])
+            chunk = data[i:i+CH]
+            # writebytes2 przyjmuje bytes/bytearray bez konwersji
+            self.spi.writebytes2(chunk)
         self._cs_high()
+
 
     def _cmd(self, c: int):
         self._dc_cmd()
@@ -120,18 +125,12 @@ class LcdSt7789:
         lgpio.gpio_write(self.gpio, self.RST, 1)
         time.sleep(0.12)
 
-    def _madctl_for_rotate(self) -> int:
-        # ST7789 MADCTL bits: MY=0x80 MX=0x40 MV=0x20 RGB/BGR=0x08
-        # W praktyce najpewniejsze są te 4 przypadki:
-        if self.rotate == 0:
-            mad = 0x00
-        elif self.rotate == 90:
-            mad = 0x60  # MV|MX
-        elif self.rotate == 180:
-            mad = 0xC0  # MX|MY
-        else:  # 270
-            mad = 0xA0  # MV|MY
+    def _madctl_value(self) -> int:
+        # Najczęściej wymagane na ST7789: BGR=0x08
+        # Bez rotacji w MADCTL (rotację robimy w software).
+        mad = 0x08  # BGR
         return (mad ^ self.madctl_base) & 0xFF
+
 
     def _init_panel(self):
         self._cmd(0x01)   # SWRESET
@@ -143,7 +142,7 @@ class LcdSt7789:
         self._data(bytes([0x55]))  # 16-bit
 
         self._cmd(0x36)   # MADCTL
-        self._data(bytes([self._madctl_for_rotate()]))
+        self._data(bytes([self._madctl_value()]))
 
         if self.invert:
             self._cmd(0x21)  # INVON
@@ -185,13 +184,15 @@ class LcdSt7789:
 
         # panel zawsze ma 240x320 okno RAM — przy rotate=90/270 my tylko zmieniamy MADCTL
         # więc wysyłamy zawsze pełne panel_w x panel_h w naturalnym układzie:
-        if self.rotate in (90, 270):
-            # logical 320x240 -> panel 240x320
-            img2 = img.rotate(90, expand=True)  # daje 240x320
+        if self.rotate == 90:
+            img2 = img.rotate(90, expand=True)
+        elif self.rotate == 270:
+            img2 = img.rotate(-90, expand=True)  # albo 270
         elif self.rotate == 180:
             img2 = img.rotate(180, expand=False)
         else:
             img2 = img
+
 
         if img2.size != (self.panel_w, self.panel_h):
             img2 = img2.resize((self.panel_w, self.panel_h))
