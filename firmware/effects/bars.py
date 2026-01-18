@@ -35,6 +35,8 @@ class BarsEffect:
 
         # "dwa poziomy na dół" (tylko gdy jest sygnał)
         min_fill_rows=2,           # czyli y=0..1
+        signal_hold_s=0.45,   # 0.3..0.8
+        _signal_timer=0.0,
 
         # 7 kolorów (po X) + gradient po Y (stała jasność)
         palette7_hues=(0.00, 0.07, 0.14, 0.33, 0.50, 0.66, 0.83),
