@@ -76,9 +76,10 @@ class SpectralFireEffect:
 
         # final injection signal: tekstura + puls
         inj = np.clip(
-            (0.55 + 0.85*intensity) * base + (0.25 + 0.55*intensity) * bass,
+            (0.50 + 0.95*intensity) * base + (0.40 + 0.75*intensity) * bass,
             0.0, 1.0
         )
+
 
         # noise dużo mniejszy (wcześniej dominował)
         noise = (np.random.rand(w).astype(np.float32) * (0.03 + 0.05*(1.0-intensity)))

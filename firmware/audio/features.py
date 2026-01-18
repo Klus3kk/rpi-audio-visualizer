@@ -51,16 +51,14 @@ class FeatureExtractor:
         self.prev_bands = band_db
 
         # STAŁA skala: noise floor i zakres dynamiczny
-        # Te wartości stroisz 1 raz i potem działa zawsze.
-        NOISE_FLOOR_DB = -75.0   # poniżej = cisza
-        RANGE_DB = 45.0          # ile dB mapujesz do 0..1
+        NOISE_FLOOR_DB = -85.0   # było -75 (za wysoko)
+        RANGE_DB = 55.0          # było 45 (łatwiej wejść w 0..1)
+        RMS_GATE = 0.006         # było 0.012 (za agresywnie)
 
         # mapowanie do 0..1
         bands_norm = (band_db - NOISE_FLOOR_DB) / RANGE_DB
         bands_norm = np.clip(bands_norm, 0.0, 1.0)
-
-        # dodatkowy twardy gate: jeśli rms małe, wyzeruj
-        RMS_GATE = 0.012
+        
         if rms < RMS_GATE:
             bands_norm[:] = 0.0
 
