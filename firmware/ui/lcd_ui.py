@@ -251,15 +251,30 @@ class LCDUI:
         label = "MIC MODE" if self.mode == "mic" else "BT MODE"
         d.text((24, 118), label, fill=ACC, font=self.font_big)
 
-        # level meter
+        # level meter (FIX: clamp fy, avoid inverted rectangle)
         mx0, my0, mx1, my1 = 24, 160, 68, self.H - 22
         d.rectangle((mx0, my0, mx1, my1), fill=(0, 0, 0), outline=GRID, width=2)
 
-        lvl = self.level
-        fy = int(my1 - lvl * (my1 - my0))
-        if fy < my1:
-            d.rectangle((mx0 + 3, fy, mx1 - 3, my1 - 3), fill=ACC2)
-            d.rectangle((mx0 + 3, fy, mx1 - 3, min(my1 - 3, fy + 6)), fill=ACC)
+        lvl = float(self.level)
+        if lvl < 0.0: lvl = 0.0
+        if lvl > 1.0: lvl = 1.0
+
+        inner_top = my0 + 3
+        inner_bot = my1 - 3
+        span = max(1, inner_bot - inner_top)
+
+        fy = int(inner_bot - lvl * span)
+
+        if fy < inner_top: fy = inner_top
+        if fy > inner_bot: fy = inner_bot
+
+        if fy < inner_bot:
+            d.rectangle((mx0 + 3, fy, mx1 - 3, inner_bot), fill=ACC2)
+
+        cap_y1 = min(inner_bot, fy + 6)
+        if cap_y1 > fy:
+            d.rectangle((mx0 + 3, fy, mx1 - 3, cap_y1), fill=ACC)
+
 
         # separator line
         yline = 150
