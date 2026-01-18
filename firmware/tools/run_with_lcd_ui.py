@@ -2,11 +2,14 @@
 # python3 -u -m firmware.tools.run_with_lcd_ui
 
 import time
-import json
 import numpy as np
+import sounddevice as sd
 
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 from firmware.audio.features import FeatureExtractor
+
+from firmware.ui.lcd_ui import LCDUI
+from firmware.io.app_bridge import AppBridge
 
 from firmware.effects.bars import BarsEffect
 from firmware.effects.oscilloscope import OscilloscopeEffect
@@ -15,160 +18,185 @@ from firmware.effects.spectral_fire import SpectralFireEffect
 from firmware.effects.vu_meter import VUMeterEffect
 from firmware.effects.wave import WaveEffect
 
-from firmware.ui.lcd_ui import LCDUI
-
-NOWP_PATH = "/tmp/now_playing.json"   # app/bt może tu wrzucać stan
-
 
 W, H = 16, 16
 NUM_LEDS = W * H
 
-PORT = "/dev/ttyUSB0"
-BAUD = 115200
+ESP_PORT = "/dev/ttyUSB0"
+ESP_BAUD = 115200
 
-FPS_LED = 40.0
-DT_LED = 1.0 / FPS_LED
+LED_FPS = 40.0
+LED_DT = 1.0 / LED_FPS
 
-FPS_LCD = 10.0          # LCD wolniej, żeby nie lagowało
-DT_LCD = 1.0 / FPS_LCD
+LCD_FPS = 10.0
+LCD_DT = 1.0 / LCD_FPS
 
 
 def make_effects(w=W, h=H):
-    return [
-        ("bars", BarsEffect(w=w, h=h)),
-        ("oscilloscope", OscilloscopeEffect(w=w, h=h)),
-        ("radial_pulse", RadialPulseEffect(w=w, h=h)),
-        ("spectral_fire", SpectralFireEffect(w=w, h=h)),
-        ("vu_meter", VUMeterEffect(w=w, h=h)),
-        ("wave", WaveEffect(w=w, h=h)),
-    ]
+    return {
+        "bars": BarsEffect(w=w, h=h),
+        "oscilloscope": OscilloscopeEffect(w=w, h=h),
+        "radial_pulse": RadialPulseEffect(w=w, h=h),
+        "spectral_fire": SpectralFireEffect(w=w, h=h),
+        "vu_meter": VUMeterEffect(w=w, h=h),
+        "wave": WaveEffect(w=w, h=h),
+    }
 
 
-def push_frame(leds: Esp32SerialDriver, frame):
-    # Twój driver nie ma show(frame), tylko set_pixel() + show()
+def apply_frame_to_esp(leds: Esp32SerialDriver, frame):
+    # frame: list[(r,g,b)] length NUM_LEDS
+    # Driver: set_pixel + show()
     for i, rgb in enumerate(frame):
         leds.set_pixel(i, rgb)
     leds.show()
 
 
-def read_now_playing():
-    # Format pliku:
-    # {
-    #   "mode": "bt"|"mic",
-    #   "connected": true/false,
-    #   "device_name": "Phone",
-    #   "device_addr": "AA:BB:CC:DD:EE:FF",
-    #   "artist": "Artist",
-    #   "title": "Track"
-    # }
-    try:
-        with open(NOWP_PATH, "r", encoding="utf-8") as f:
-            return json.load(f)
-    except Exception:
-        return None
-
-
 def main():
-    leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=PORT, baud=BAUD, debug=False)
+    # --- devices ---
+    leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=ESP_PORT, baud=ESP_BAUD, debug=False)
 
-    # LCD (Twoje działające: spidev+lgpio)
     ui = LCDUI(
+        dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
-        dc=25, rst=24, cs_gpio=5,     # jeśli CE0/CE1 -> cs_gpio=None
-        rotate=90,                    # jak źle: 270
-        dim=0.75,
+        w_panel=240, h_panel=320,
+        rotate=90,     # jeśli źle: 270
+        invert=True,
+        dim=0.85,
     )
 
-    fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000)
+    app = AppBridge(rfcomm_dev="/dev/rfcomm0", tcp_host="127.0.0.1", tcp_port=8765)
 
-    import sounddevice as sd
+    # --- audio ---
+    fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000)
     block = fe.nfft
-    stream = sd.InputStream(samplerate=fe.sr, channels=1, blocksize=block, dtype="float32")
+
+    stream = sd.InputStream(
+        samplerate=fe.sr,
+        channels=1,
+        blocksize=block,
+        dtype="float32",
+    )
     stream.start()
 
     effects = make_effects()
-    eff_i = 0
-    eff_name, eff = effects[eff_i]
+    effect_order = list(effects.keys())
+    cur_effect_name = "bars"
+    cur_effect = effects[cur_effect_name]
 
+    # --- params ---
     params = {
-        "intensity": 0.75,
+        "intensity": 0.65,
         "color_mode": "auto",
-        "power": 0.55,   # globalnie przyciemniaj efekty (ważne)
-        "glow": 0.25,
+        "power": 0.70,   # global brightness limiter dla efektów które używają palette
+        "glow": 0.20,
     }
 
-    ui.set_mode("mic")
-    ui.set_status("running")
-    ui.set_level(0.0)
+    # mic gain (ważne dla “telefon przy głośniku”)
+    mic_gain = 2.5        # zwiększ jeśli słabo reaguje
+    mic_rms_scale = 10.0  # UI level z RMS
 
-    t_prev = time.monotonic()
-    t_next_lcd = time.monotonic()
-    t_next_led = time.monotonic()
+    mode = "mic"  # mic/bt
+
+    ui.set_status("boot")
+    ui.set_mode(mode)
+    ui.set_level(0.0)
+    ui.render()
+
+    t_last_led = time.monotonic()
+    t_last_lcd = t_last_led
 
     try:
         while True:
             now = time.monotonic()
-            dt = now - t_prev
-            t_prev = now
 
-            # ---------- MODE + NOW PLAYING z app/BT ----------
-            nowp = read_now_playing()
-            if nowp:
-                mode = "bt" if str(nowp.get("mode", "")).lower() == "bt" else "mic"
-                ui.set_mode(mode)
-                ui.set_bt(
-                    connected=bool(nowp.get("connected", False)),
-                    device_name=str(nowp.get("device_name", "")),
-                    device_addr=str(nowp.get("device_addr", "")),
-                )
-                ui.set_track(
-                    artist=str(nowp.get("artist", "")),
-                    title=str(nowp.get("title", "")),
-                )
-                if mode == "bt":
-                    ui.set_status("bt mode")
-                else:
-                    ui.set_status("mic mode")
-            else:
-                ui.set_mode("mic")
-                ui.set_bt(connected=False, device_name="", device_addr="")
-                ui.set_track(artist="", title="")
-                ui.set_status("mic mode")
+            # --------- APP / BT updates (non-blocking) ----------
+            ad = app.get_latest()
 
-            # ---------- AUDIO (MIC) ----------
-            # (BT audio możesz dodać później; teraz UI+matryca dalej działają)
+            # mode
+            if isinstance(ad.get("mode"), str) and ad["mode"].lower() in ("mic", "bt"):
+                mode = ad["mode"].lower()
+
+            # effect override from app
+            if isinstance(ad.get("effect"), str) and ad["effect"] in effects:
+                cur_effect_name = ad["effect"]
+                cur_effect = effects[cur_effect_name]
+
+            # intensity override from app
+            if ad.get("intensity") is not None:
+                try:
+                    params["intensity"] = float(ad["intensity"])
+                except Exception:
+                    pass
+
+            # color_mode override from app
+            if isinstance(ad.get("color_mode"), str) and ad["color_mode"]:
+                params["color_mode"] = ad["color_mode"]
+
+            # --------- AUDIO read ----------
             x, _ = stream.read(block)
-            x = x[:, 0].astype(np.float32)
+            x = x[:, 0].astype(np.float32, copy=False)
+
+            # mic gain (tylko w MIC)
+            if mode == "mic":
+                x = np.clip(x * mic_gain, -1.0, 1.0)
+
             features = fe.compute(x)
 
-            # level na UI: z RMS (wzmocnione)
-            lvl = min(1.0, features.get("rms", 0.0) * 12.0)
-            ui.set_level(lvl)
+            # --------- LED update (fixed rate) ----------
+            if now - t_last_led >= LED_DT:
+                dt = now - t_last_led
+                t_last_led = now
 
-            # ---------- LED FRAME ----------
-            if now >= t_next_led:
-                t_next_led = now + DT_LED
-
-                # frame
+                # w BT możesz w przyszłości podmienić source audio na “BT stream”
+                # na razie LED zawsze idzie z MIC features (ale tryb na UI się przełącza)
                 try:
-                    frame = eff.update(features, DT_LED, params)
+                    frame = cur_effect.update(features, dt, params)
                 except TypeError:
-                    frame = eff.update(features, DT_LED)
+                    frame = cur_effect.update(features, dt)
 
                 if len(frame) != NUM_LEDS:
                     frame = list(frame)
                     if len(frame) != NUM_LEDS:
-                        continue
+                        raise RuntimeError(f"{cur_effect_name}: frame len {len(frame)} != {NUM_LEDS}")
 
-                push_frame(leds, frame)
+                apply_frame_to_esp(leds, frame)
 
-            # ---------- LCD RENDER ----------
-            if now >= t_next_lcd:
-                t_next_lcd = now + DT_LCD
-                # możesz tu też wyświetlać aktualny efekt:
+            # --------- LCD update (throttled) ----------
+            if now - t_last_lcd >= LCD_DT:
+                t_last_lcd = now
+
+                # level na LCD (bardziej czułe niż “surowe rms”)
+                lvl = float(features.get("rms", 0.0)) * mic_rms_scale
+                if lvl > 1.0:
+                    lvl = 1.0
+
+                ui.set_mode(mode)
+                ui.set_level(lvl)
+
+                # status krótkie
+                st = ad.get("status") or ""
+                if not st:
+                    st = f"{cur_effect_name}  int={params['intensity']:.2f}"
+                ui.set_status(st)
+
+                # BT info z apki
+                if mode == "bt":
+                    ui.set_bt(
+                        connected=bool(ad.get("connected", False)),
+                        device_name=str(ad.get("device_name") or ""),
+                        device_addr=str(ad.get("device_addr") or ""),
+                    )
+                    ui.set_track(
+                        artist=str(ad.get("artist") or ""),
+                        title=str(ad.get("title") or ""),
+                    )
+                else:
+                    ui.set_bt(connected=False, device_name="", device_addr="")
+                    ui.set_track(artist="", title="")
+
                 ui.render()
 
-            # krótki sleep żeby CPU nie mieliło 100%
+            # mały sleep żeby CPU nie wyło
             time.sleep(0.001)
 
     finally:
@@ -179,10 +207,16 @@ def main():
             pass
         try:
             leds.clear()
-            leds.close()
         except Exception:
             pass
-        ui.close()
+        try:
+            ui.close()
+        except Exception:
+            pass
+        try:
+            app.stop()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":
