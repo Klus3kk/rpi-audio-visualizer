@@ -1,10 +1,5 @@
-# firmware/effects/spectral_fire.py
 import numpy as np
-from firmware.effects.bars import serpentine_index
 from firmware.effects.palette import color_for
-
-def _clamp01(x):
-    return 0.0 if x < 0.0 else (1.0 if x > 1.0 else float(x))
 
 class SpectralFireEffect:
     def __init__(self, w=16, h=16):
@@ -21,7 +16,6 @@ class SpectralFireEffect:
         w, h = self.w, self.h
         intensity  = float(params.get("intensity", 0.75))
         color_mode = params.get("color_mode", "auto")
-        power      = float(params.get("power", 0.55))
 
         bands = np.asarray(features.get("bands", np.zeros(w, np.float32)), dtype=np.float32)
         if bands.shape[0] != w:
@@ -32,41 +26,32 @@ class SpectralFireEffect:
 
         base = np.clip(base, 0.0, 1.0)
 
-        # wzmocnienie reakcji + kompresja
-        gain = 0.85 + 2.60 * intensity
-        base = np.power(np.clip(base * gain, 0.0, 1.0), 0.75)
+        # mocniejsza reakcja
+        base = np.power(np.clip(base * (0.90 + 2.80 * intensity), 0.0, 1.0), 0.65)
 
-        # 1) SHIFT UP (waterfall)
+        # shift up (ogień idzie w górę)
         self.field[1:, :] = self.field[:-1, :]
 
-        # 2) bottom injection = aktualne pasma + drobny noise
-        noise = (np.random.rand(w).astype(np.float32) * 0.06)
+        # dół = sygnał + odrobina szumu (mało)
+        noise = (np.random.rand(w).astype(np.float32) * 0.02)
         self.field[0, :] = np.clip(0.92 * base + noise, 0.0, 1.0)
 
-        # 3) lekka dyfuzja + wygaszanie w górę (żeby było “fire”)
+        # rozmycie + chłodzenie
         for y in range(1, h):
             a = self.field[y, :]
-            a = (a + 0.55*np.roll(a, 1) + 0.55*np.roll(a, -1)) / (1.0 + 0.55 + 0.55)
-            cool = (0.02 + 0.06*(1.0 - intensity)) * (1.0 + 0.9*(y / max(1, h-1)))
+            a = (a + 0.70*np.roll(a, 1) + 0.70*np.roll(a, -1)) / (1.0 + 0.70 + 0.70)
+
+            cool = (0.020 + 0.060 * (1.0 - intensity)) * (1.0 + 0.8 * (y / max(1, h-1)))
             self.field[y, :] = np.clip(a - cool, 0.0, 1.0)
 
         frame = [(0, 0, 0)] * (w * h)
-        mode = ("auto" if color_mode == "auto" else color_mode)
 
         for y in range(h):
-            ty = self.t + 0.04 * y
-            # moc maleje z wysokością (mniej “białych” gór)
-            row_power = power * (0.95 - 0.35 * (y / max(1, h-1)))
             for x in range(w):
                 v = float(self.field[y, x])
-                if v <= 0.01:
-                    continue
-                # ogień: v w palecie, ale tnie mocno globalnie
-                c = color_for(_clamp01(0.06 + 0.55*v), ty + 0.02*x, mode=mode)
-                frame[serpentine_index(x, y, w=w, h=h, origin_bottom=True)] = (
-                    int(c[0] * row_power),
-                    int(c[1] * row_power),
-                    int(c[2] * row_power),
-                )
+
+                # zawsze coś: v -> 0.18..1.0
+                vv = 0.18 + 0.82 * v
+                frame[y * w + x] = color_for(vv, self.t + 0.03 * y + 0.01 * x, mode=color_mode)
 
         return frame
