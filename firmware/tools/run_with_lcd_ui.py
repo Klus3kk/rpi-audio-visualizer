@@ -1,6 +1,3 @@
-# firmware/tools/run_with_lcd_ui.py
-# python3 -u -m firmware.tools.run_with_lcd_ui
-
 import time
 import numpy as np
 import sounddevice as sd
@@ -27,7 +24,7 @@ BAUD = 115200
 FPS = 40.0
 DT_TARGET = 1.0 / FPS
 
-SWITCH_EVERY_S = 5.0  # możesz dać 999999 jeśli nie chcesz auto-switch
+SWITCH_EVERY_S = 5.0  # auto-switch
 
 
 def push_frame(driver: Esp32SerialDriver, frame):

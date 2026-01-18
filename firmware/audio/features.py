@@ -74,6 +74,6 @@ class FeatureExtractor:
             "treble": treble,
             "samplerate": self.sr,
             "nfft": self.nfft,
-            "mag": mag2,          # <-- dodaj
+            "mag": mag2,          
         }
 

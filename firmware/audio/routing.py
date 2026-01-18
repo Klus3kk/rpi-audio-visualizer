@@ -19,6 +19,4 @@ def input_for_mode(mode: str):
         return pick_input_device(["monitor", "bluez"])
     if mode == "mic":
         return pick_input_device(["usb", "mic", "quadcast", "hyperx"])
-    if mode == "local":
-        return pick_input_device(["monitor"])
     return pick_input_device([])
