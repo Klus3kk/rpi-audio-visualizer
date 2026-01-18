@@ -30,22 +30,42 @@ ADV_PATH = "/visualizer/adv0"
 # ===================== SHARED STATE =====================
 
 class SharedState:
+    """
+    Shared state between BLE and main loop.
+
+    NOTE:
+    - accept patches for known keys only (prevents junk)
+    - includes BT metadata fields for LCD display in BT mode
+    """
     def __init__(self):
         self.lock = threading.Lock()
         self.state = {
-            "mode": "mic",
+            # control
+            "mode": "mic",            # mic|bt
             "effect": "bars",
             "brightness": 0.55,
             "intensity": 0.75,
             "gain": 1.0,
             "smoothing": 0.65,
+            "color_mode": "auto",     # auto|rainbow|mono  (jeśli apka zacznie wysyłać)
+
+            # bt metadata (for LCD)
+            "connected": False,
+            "device_name": "",
+            "device_addr": "",
+            "artist": "",
+            "title": "",
         }
+
+        # whitelist
+        self.allowed = set(self.state.keys())
 
     def update(self, patch: dict):
         with self.lock:
             for k, v in patch.items():
-                if k in self.state:
-                    self.state[k] = v
+                if k not in self.allowed:
+                    continue
+                self.state[k] = v
 
     def snapshot(self):
         with self.lock:
@@ -117,20 +137,56 @@ class CmdCharacteristic:
 
 
 class StateCharacteristic:
+    """
+    Optional notify characteristic. Your app already supports it (kState).
+    We implement Notify via PropertiesChanged on org.freedesktop.DBus.Properties.
+    """
     def __init__(self):
         self.path = STATE_PATH
         self.uuid = STATE_UUID
-        self.flags = ["notify"]
+        self.flags = ["notify", "read"]
+        self._notifying = False
+        self._bus = None
+        self._last_json = ""
+
+    def _emit_changed(self):
+        if not self._notifying or self._bus is None:
+            return
+        try:
+            # properties changed signal
+            props_iface = "org.freedesktop.DBus.Properties"
+            chrc_iface = GATT_CHRC_IFACE
+            val = list(json.dumps(SHARED.snapshot()).encode("utf-8"))
+            self._bus.con.signal(
+                self.path,
+                props_iface,
+                "PropertiesChanged",
+                "sa{sv}as",
+                (chrc_iface, {"Value": val}, []),
+            )
+        except Exception:
+            pass
 
     def ReadValue(self, options):
         data = json.dumps(SHARED.snapshot()).encode("utf-8")
         return list(data)
 
     def StartNotify(self):
-        pass
+        self._notifying = True
+        # start periodic notify every 500ms (lightweight)
+        def tick():
+            if not self._notifying:
+                return False
+            snap = SHARED.snapshot()
+            js = json.dumps(snap, separators=(",", ":"))
+            if js != self._last_json:
+                self._last_json = js
+                self._emit_changed()
+            return True
+        GLib.timeout_add(500, tick)
 
     def StopNotify(self):
-        pass
+        self._notifying = False
 
     def get_props(self):
         return {
@@ -182,9 +238,13 @@ def start_ble():
     app = Application()
     adv = Advertisement()
 
+    # publish objects
     bus.publish(APP_PATH, app)
     bus.publish(SVC_PATH, app.services[0])
     for c in app.services[0].characteristics:
+        # attach bus for notify characteristic
+        if isinstance(c, StateCharacteristic):
+            c._bus = bus
         bus.publish(c.path, c)
     bus.publish(ADV_PATH, adv)
 

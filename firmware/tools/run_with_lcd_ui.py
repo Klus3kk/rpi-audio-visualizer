@@ -1,12 +1,14 @@
 # firmware/tools/run_with_lcd_ui.py
 # python3 -u -m firmware.tools.run_with_lcd_ui
 
+import threading
 import time
 import numpy as np
+import sounddevice as sd
 
 from firmware.ui.lcd_ui import LCDUI
 from firmware.audio.features import FeatureExtractor
-from firmware.audio.sources import MicSource, PipeWireBtSource
+from firmware.audio.bt_bluealsa import BlueAlsaInput
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 
 from firmware.effects.bars import BarsEffect
@@ -17,9 +19,8 @@ from firmware.effects.vu_meter import VUMeterEffect
 from firmware.effects.wave import WaveEffect
 
 from firmware.bt.ble_gatt_server import start_ble, SHARED
-import threading
 
-# BLE sterowanie (Twoja apka) - tylko control, bez audio
+
 threading.Thread(target=start_ble, daemon=True).start()
 
 W, H = 16, 16
@@ -30,6 +31,9 @@ BAUD = 115200
 
 FPS_LED = 20.0
 FPS_LCD = 20.0
+
+SR = 44100
+NFFT = 1024
 
 
 def make_effects(w=W, h=H):
@@ -53,53 +57,78 @@ def push_frame(leds: Esp32SerialDriver, frame):
     leds.show()
 
 
-def _clamp01(v: float) -> float:
-    v = float(v)
-    if v < 0.0:
+def get_state():
+    # atomic snapshot from BLE shared
+    try:
+        return SHARED.snapshot()
+    except Exception:
+        return {}
+
+
+def f01(v, default):
+    try:
+        x = float(v)
+    except Exception:
+        x = float(default)
+    if x < 0.0:
         return 0.0
-    if v > 1.0:
+    if x > 1.0:
         return 1.0
-    return v
+    return x
 
 
 def main():
-    # --- LCD UI (niebieski) ---
+    # ---- LCD ----
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
         rotate=270,
+        mirror=True,              # jeśli lustrzane -> False
+        panel_invert=True,        # jeśli kolory złe -> False
         dim=0.90,
         font_size=13,
         font_size_big=18,
+        accent=(30, 140, 255),
+        bg=(0, 0, 0),
     )
-    # jeśli Twój LCDUI nie ma set_theme, ustaw kolor w samym lcd_ui.py na stałe (accent blue).
-    # Tu zakładam, że już masz niebieski.
 
-    # --- LED driver ---
+    # ---- LED ----
     leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=PORT, baud=BAUD, debug=False)
 
-    # --- Audio + features ---
-    fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=90, fmax=16000)
+    # ---- Features ----
+    fe = FeatureExtractor(samplerate=SR, nfft=NFFT, bands=16, fmin=90, fmax=16000)
 
-    mic = MicSource(samplerate=fe.sr, blocksize=fe.nfft)
-    # target opcjonalny; jak chcesz wskazać konkretny node pipewire:
-    # bt = PipeWireBtSource(samplerate=fe.sr, channels=2, target="bluez_output....a2dp-sink")
-    bt = PipeWireBtSource(samplerate=fe.sr, channels=2, target=None)
+    # ---- MIC ----
+    mic_stream = sd.InputStream(
+        samplerate=SR,
+        channels=1,
+        blocksize=NFFT,
+        dtype="float32",
+    )
+    mic_stream.start()
 
+    # ---- BT (lazy start) ----
+    bt_in = None
+
+    # ---- Effects ----
     effects = make_effects()
     effect_name = "bars"
     effect = effects[effect_name]
 
     params = {
-        "intensity": 0.65,      # INT
-        "color_mode": "auto",   # CLR (auto/rainbow/mono)
-        "power": 0.50,
+        "intensity": 0.75,
+        "color_mode": "auto",
+        "brightness": 0.55,
+        "gain": 1.0,
+        "smoothing": 0.65,
+        "power": 0.55,
         "glow": 0.25,
     }
 
-    # Start w MIC (tak jak chcesz)
-    desired_mode = "mic"
+    # start mode = mic (wymuszenie na starcie)
+    current_mode = "mic"
 
+    # timers
     t_led = time.monotonic()
     t_lcd = time.monotonic()
     dt_led = 1.0 / FPS_LED
@@ -110,44 +139,85 @@ def main():
     try:
         while True:
             now = time.monotonic()
+            st = get_state()
 
-            # -------- 1) ZABIERZ STEROWANIE Z BLE (apka) --------
-            # SHARED powinien zawierać to co apka wysyła (mode/effect/intensity/brightness/gain/smoothing + artist/title itd)
-            # Zakładam, że start_ble aktualizuje SHARED["cmd"] jako dict (albo SHARED bezpośrednio).
-            cmd = SHARED.get("cmd", {}) if isinstance(SHARED, dict) else {}
-            if isinstance(cmd, dict):
-                if "mode" in cmd:
-                    m = str(cmd["mode"]).lower()
-                    desired_mode = "bt" if m == "bt" else "mic"
-                if "effect" in cmd:
-                    e = str(cmd["effect"]).lower()
-                    if e in effects:
-                        effect_name = e
-                        effect = effects[effect_name]
-                if "intensity" in cmd:
-                    params["intensity"] = _clamp01(cmd["intensity"])
-                if "color_mode" in cmd:
-                    cm = str(cmd["color_mode"]).lower()
-                    if cm in ("auto", "rainbow", "mono"):
-                        params["color_mode"] = cm
+            # desired mode
+            desired_mode = str(st.get("mode", "mic")).lower()
+            desired_mode = "bt" if desired_mode == "bt" else "mic"
 
-            # -------- 2) WYBIERZ ŹRÓDŁO AUDIO ZALEŻNIE OD MODE --------
-            if desired_mode == "bt":
-                x = bt.read(fe.nfft)   # BT audio
+            # effect
+            desired_fx = str(st.get("effect", effect_name)).lower()
+            if desired_fx in effects and desired_fx != effect_name:
+                effect_name = desired_fx
+                effect = effects[effect_name]
+
+            # params
+            params["brightness"] = f01(st.get("brightness", params["brightness"]), params["brightness"])
+            params["intensity"] = f01(st.get("intensity", params["intensity"]), params["intensity"])
+
+            try:
+                params["gain"] = float(st.get("gain", params["gain"]))
+            except Exception:
+                pass
+            try:
+                params["smoothing"] = float(st.get("smoothing", params["smoothing"]))
+            except Exception:
+                pass
+
+            cm = str(st.get("color_mode", params["color_mode"])).lower()
+            if cm in ("auto", "rainbow", "mono"):
+                params["color_mode"] = cm
+
+            # mode switch: start/stop BT pipeline
+            if desired_mode != current_mode:
+                current_mode = desired_mode
+
+                if current_mode == "bt":
+                    try:
+                        bt_in = BlueAlsaInput(
+                            bt_addr=None,        # autodetect; or set env VIS_BT_ADDR
+                            rate=SR,
+                            channels=2,
+                            chunk_frames=NFFT,
+                            playback=True,       # RPi gra jako głośnik
+                            out_device=None,
+                        )
+                        bt_in.start()
+                    except Exception:
+                        bt_in = None
+                else:
+                    try:
+                        if bt_in is not None:
+                            bt_in.stop()
+                    except Exception:
+                        pass
+                    bt_in = None
+
+            # audio block
+            if current_mode == "bt":
+                if bt_in is not None and bt_in.is_running():
+                    x = bt_in.read_mono_f32()
+                else:
+                    x = np.zeros(NFFT, dtype=np.float32)
             else:
-                x = mic.read(fe.nfft)  # MIC audio
+                try:
+                    x, _ = mic_stream.read(NFFT)
+                    x = x[:, 0].astype(np.float32, copy=False)
+                except Exception:
+                    x = np.zeros(NFFT, dtype=np.float32)
 
-            # bass rumble kill (uspokaja)
-            x = x.astype(np.float32, copy=False)
+            # stabilize low-end
             x = x - float(np.mean(x))
+            x = x * float(params["gain"])
 
+            # features
             try:
                 feats = fe.compute(x)
                 last_feats = feats
             except Exception:
                 feats = last_feats
 
-            # -------- 3) LED --------
+            # LED
             if now - t_led >= dt_led:
                 t_led = now
                 try:
@@ -168,14 +238,13 @@ def main():
                 except Exception:
                     pass
 
-            # -------- 4) LCD --------
+            # LCD
             if now - t_lcd >= dt_lcd:
                 t_lcd = now
 
-                ui.set_mode(desired_mode)
+                ui.set_mode(current_mode)
                 ui.set_effect(effect_name)
                 ui.set_visual_params(intensity=params["intensity"], color_mode=params["color_mode"])
-
                 ui.set_mic_feats(
                     rms=float(feats.get("rms", 0.0)),
                     bass=float(feats.get("bass", 0.0)),
@@ -183,21 +252,19 @@ def main():
                     treble=float(feats.get("treble", 0.0)),
                 )
 
-                if desired_mode == "bt":
-                    # info z apki (najprościej) – apka już ma artist/title (możesz wysyłać też device_name/addr/connected)
-                    ui.set_status("bt audio")
-                    if isinstance(cmd, dict):
-                        ui.set_bt(
-                            connected=bool(cmd.get("connected", True)),
-                            device_name=str(cmd.get("device_name", ""))[:24],
-                            device_addr=str(cmd.get("device_addr", ""))[:24],
-                        )
-                        ui.set_track(
-                            artist=str(cmd.get("artist", ""))[:26],
-                            title=str(cmd.get("title", ""))[:26],
-                        )
+                if current_mode == "bt":
+                    ui.set_bt(
+                        connected=bool(st.get("connected", True)),
+                        device_name=str(st.get("device_name", "")),
+                        device_addr=str(st.get("device_addr", "")),
+                    )
+                    ui.set_track(
+                        artist=str(st.get("artist", "")),
+                        title=str(st.get("title", "")),
+                    )
+                    ui.set_status("bt mode")
                 else:
-                    ui.set_status("mic listening")
+                    ui.set_status("mic mode")
 
                 try:
                     ui.render()
@@ -206,18 +273,23 @@ def main():
 
     finally:
         try:
-            bt.close()
+            if bt_in is not None:
+                bt_in.stop()
         except Exception:
             pass
+
         try:
-            mic.close()
+            mic_stream.stop()
+            mic_stream.close()
         except Exception:
             pass
+
         try:
             leds.clear()
             leds.close()
         except Exception:
             pass
+
         try:
             ui.close()
         except Exception:
