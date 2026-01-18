@@ -3,7 +3,6 @@
 
 import traceback
 import sys
-
 import threading
 import time
 import numpy as np
@@ -24,7 +23,16 @@ from firmware.effects.wave import WaveEffect
 from firmware.bt.ble_gatt_server import start_ble, SHARED
 
 
-threading.Thread(target=start_ble, daemon=True).start()
+# ---- BLE thread (safe) ----
+def ble_thread():
+    try:
+        start_ble()
+    except Exception as e:
+        print(f"[ERR] BLE thread: {e}", file=sys.stderr)
+        traceback.print_exc()
+
+threading.Thread(target=ble_thread, daemon=True).start()
+
 
 W, H = 16, 16
 NUM_LEDS = W * H
@@ -56,12 +64,13 @@ def make_effects(w=W, h=H):
 
 
 def clamp8(x: int) -> int:
-    return 0 if x < 0 else (255 if x > 255 else x)
+    return 0 if x < 0 else (255 if x > 255 else int(x))
 
 
 def push_frame(leds: Esp32SerialDriver, frame):
+    # frame = list[(r,g,b)] length = NUM_LEDS
     for i, (r, g, b) in enumerate(frame):
-        leds.set_pixel(i, (clamp8(int(r)), clamp8(int(g)), clamp8(int(b))))
+        leds.set_pixel(i, (clamp8(r), clamp8(g), clamp8(b)))
     leds.show()
 
 
@@ -84,10 +93,68 @@ def f01(v, default):
     return x
 
 
+def clamp_gain(v, default=1.0):
+    try:
+        g = float(v)
+    except Exception:
+        g = float(default)
+    if not np.isfinite(g):
+        g = float(default)
+    # kluczowe: NIGDY nie pozwól na 0, bo wycisza cały sygnał
+    if g < 0.05:
+        g = 0.05
+    if g > 6.0:
+        g = 6.0
+    return g
+
+
+def sanitize_feats(feats: dict, w=W):
+    # ważne: bands/mag to tablice -> też trzeba wyczyścić NaN/inf
+    try:
+        rms = float(feats.get("rms", 0.0))
+        if not np.isfinite(rms):
+            feats["rms"] = 0.0
+    except Exception:
+        feats["rms"] = 0.0
+
+    try:
+        bands = feats.get("bands", None)
+        if bands is not None:
+            b = np.asarray(bands, dtype=np.float32)
+            if b.shape[0] != w:
+                # dopasuj do 16 jeśli trzeba
+                xi = np.linspace(0, b.shape[0] - 1, w)
+                b = np.interp(xi, np.arange(b.shape[0]), b).astype(np.float32)
+            b = np.nan_to_num(b, nan=0.0, posinf=0.0, neginf=0.0)
+            b = np.clip(b, 0.0, 1.0)
+            feats["bands"] = b
+    except Exception:
+        pass
+
+    try:
+        mag = feats.get("mag", None)
+        if mag is not None:
+            m = np.asarray(mag, dtype=np.float32)
+            m = np.nan_to_num(m, nan=0.0, posinf=0.0, neginf=0.0)
+            feats["mag"] = m
+    except Exception:
+        pass
+
+    # bass/mid/treble też
+    for k in ("bass", "mid", "treble"):
+        try:
+            v = float(feats.get(k, 0.0))
+            feats[k] = 0.0 if not np.isfinite(v) else v
+        except Exception:
+            feats[k] = 0.0
+
+    return feats
+
+
 def safe_update_effect(effect, feats, dt, params, effect_name: str, effects: dict):
     """
     Never let an effect crash the main loop.
-    If effect.update throws -> log + reset effect instance + return black frame.
+    If effect.update throws -> log + return black frame (keep same instance).
     """
     try:
         try:
@@ -97,27 +164,7 @@ def safe_update_effect(effect, feats, dt, params, effect_name: str, effects: dic
         return frame, effect
     except Exception as e:
         log_exc(f"effect.update({effect_name})", e)
-        # reset effect instance (best-effort)
-        try:
-            effect = effects[effect_name]
-        except Exception:
-            pass
         return [(0, 0, 0)] * NUM_LEDS, effect
-
-
-def sanitize_feats(feats: dict):
-    # NaN/inf guard (NaNs frequently crash visuals)
-    try:
-        for k, v in list(feats.items()):
-            try:
-                fv = float(v)
-                if not np.isfinite(fv):
-                    feats[k] = 0.0
-            except Exception:
-                feats[k] = 0.0
-    except Exception:
-        pass
-    return feats
 
 
 def main():
@@ -126,12 +173,12 @@ def main():
         dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
         rotate=270,
-        mirror=True,              # jeśli lustrzane -> False
-        panel_invert=True,        # jeśli kolory złe -> False
+        mirror=True,
+        panel_invert=True,
         dim=0.90,
         font_size=13,
         font_size_big=18,
-        accent=(30, 140, 255),    # BLUE
+        accent=(30, 140, 255),
         bg=(0, 0, 0),
     )
 
@@ -168,14 +215,14 @@ def main():
         "glow": 0.25,
     }
 
-    current_mode = "mic"  # start always mic
+    current_mode = "mic"
 
     t_led = time.monotonic()
     t_lcd = time.monotonic()
     dt_led = 1.0 / FPS_LED
     dt_lcd = 1.0 / FPS_LCD
 
-    last_feats = {"rms": 0.0, "bass": 0.0, "mid": 0.0, "treble": 0.0}
+    last_feats = {"rms": 0.0, "bands": np.zeros(16, dtype=np.float32), "bass": 0.0, "mid": 0.0, "treble": 0.0}
 
     try:
         while True:
@@ -183,26 +230,28 @@ def main():
             now = loop_start
             st = get_state()
 
-            # ---- desired mode
-            desired_mode = str(st.get("mode", "mic")).lower()
-            desired_mode = "bt" if desired_mode == "bt" else "mic"
+            # ---- desired mode (GUARD: BT tylko jeśli "connected" true) ----
+            raw_mode = str(st.get("mode", "mic")).lower()
+            if raw_mode == "bt" and bool(st.get("connected", False)):
+                desired_mode = "bt"
+            else:
+                desired_mode = "mic"
 
-            # ---- effect
+            # ---- effect ----
             desired_fx = str(st.get("effect", effect_name)).lower()
             if desired_fx in effects and desired_fx != effect_name:
                 effect_name = desired_fx
                 effect = effects[effect_name]
 
-            # ---- params
+            # ---- params (HARD CLAMPS) ----
             params["brightness"] = f01(st.get("brightness", params["brightness"]), params["brightness"])
             params["intensity"] = f01(st.get("intensity", params["intensity"]), params["intensity"])
+            params["gain"] = clamp_gain(st.get("gain", params["gain"]), params["gain"])
 
             try:
-                params["gain"] = float(st.get("gain", params["gain"]))
-            except Exception:
-                pass
-            try:
-                params["smoothing"] = float(st.get("smoothing", params["smoothing"]))
+                sm = float(st.get("smoothing", params["smoothing"]))
+                if np.isfinite(sm):
+                    params["smoothing"] = 0.0 if sm < 0.0 else (0.95 if sm > 0.95 else sm)
             except Exception:
                 pass
 
@@ -210,7 +259,7 @@ def main():
             if cm in ("auto", "rainbow", "mono"):
                 params["color_mode"] = cm
 
-            # ---- switch mode (start/stop BT capture)
+            # ---- switch mode ----
             if desired_mode != current_mode:
                 current_mode = desired_mode
 
@@ -223,12 +272,13 @@ def main():
                             channels=2,
                             chunk_frames=NFFT,
                             playback=True,
-                            out_pcm="hdmi:CARD=vc4hdmi0,DEV=0",  # zmień jeśli chcesz inne wyjście
+                            out_pcm="hdmi:CARD=vc4hdmi0,DEV=0",
                         )
                         bt_in.start()
                     except Exception as e:
                         log_exc("BlueAlsaInput.start()", e)
                         bt_in = None
+                        current_mode = "mic"  # fail-safe
                 else:
                     try:
                         if bt_in is not None:
@@ -237,7 +287,7 @@ def main():
                         log_exc("BlueAlsaInput.stop()", e)
                     bt_in = None
 
-            # ---- audio block
+            # ---- audio block ----
             if current_mode == "bt":
                 if bt_in is not None and bt_in.is_running():
                     try:
@@ -246,16 +296,22 @@ def main():
                         log_exc("bt_in.read_mono_f32()", e)
                         x = np.zeros(NFFT, dtype=np.float32)
                 else:
+                    # BT mode ale stream nie działa -> wróć na MIC zamiast truć zerami
+                    current_mode = "mic"
                     x = np.zeros(NFFT, dtype=np.float32)
             else:
+                # NON-BLOCKING MIC READ (ważne)
                 try:
-                    x, _ = mic_stream.read(NFFT)
-                    x = x[:, 0].astype(np.float32, copy=False)
+                    if mic_stream.read_available < NFFT:
+                        x = np.zeros(NFFT, dtype=np.float32)
+                    else:
+                        x, _ = mic_stream.read(NFFT)
+                        x = x[:, 0].astype(np.float32, copy=False)
                 except Exception as e:
                     log_exc("mic_stream.read()", e)
                     x = np.zeros(NFFT, dtype=np.float32)
 
-            # ---- stabilize low-end + gain
+            # ---- stabilize + gain ----
             try:
                 x = x - float(np.mean(x))
             except Exception:
@@ -265,16 +321,16 @@ def main():
             except Exception:
                 pass
 
-            # ---- features
+            # ---- features (apply smoothing from UI) ----
             try:
-                feats = fe.compute(x)
-                feats = sanitize_feats(feats)
+                feats = fe.compute(x, smoothing=params.get("smoothing", 0.65))
+                feats = sanitize_feats(feats, w=W)
                 last_feats = feats
             except Exception as e:
                 log_exc("FeatureExtractor.compute()", e)
                 feats = last_feats
 
-            # ---- LED
+            # ---- LED ----
             if now - t_led >= dt_led:
                 t_led = now
 
@@ -285,19 +341,21 @@ def main():
                     if frame is None or len(frame) != NUM_LEDS:
                         frame = [(0, 0, 0)] * NUM_LEDS
                     else:
-                        frame = [(clamp8(int(r)), clamp8(int(g)), clamp8(int(b))) for (r, g, b) in frame]
+                        # hard sanitize RGB
+                        frame = [
+                            (clamp8(int(r)), clamp8(int(g)), clamp8(int(b)))
+                            for (r, g, b) in frame
+                        ]
                 except Exception as e:
                     log_exc("frame.sanitize", e)
                     frame = [(0, 0, 0)] * NUM_LEDS
 
-                # serial safe
                 try:
                     push_frame(leds, frame)
                 except Exception as e:
                     log_exc("push_frame(serial)", e)
-                    pass
 
-            # ---- LCD
+            # ---- LCD ----
             if now - t_lcd >= dt_lcd:
                 t_lcd = now
 
@@ -322,15 +380,15 @@ def main():
                             artist=str(st.get("artist", "")),
                             title=str(st.get("title", "")),
                         )
-                        ui.set_status("bt mode")
+                        ui.set_status(f"bt mode | gain={params['gain']:.2f}")
                     else:
-                        ui.set_status("mic mode")
+                        ui.set_status(f"mic mode | gain={params['gain']:.2f}")
 
                     ui.render()
                 except Exception as e:
                     log_exc("LCDUI.render()", e)
 
-            # ---- watchdog: slow loop != crash
+            # ---- watchdog ----
             loop_dt = time.monotonic() - loop_start
             if loop_dt > 0.25:
                 print(f"[WARN] slow loop: {loop_dt:.3f}s (fx={effect_name}, mode={current_mode})", file=sys.stderr)
