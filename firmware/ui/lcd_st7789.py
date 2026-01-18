@@ -1,19 +1,10 @@
 # firmware/ui/lcd_st7789.py
-# Minimal ST7789 SPI driver (no luma). Uses spidev + RPi.GPIO.
-# Panel: 240x320. We render UI in landscape (320x240) and transpose() to panel.
-#
-# Pins (BCM):
-#   DC  = 25
-#   RST = 24
-#   CS  = None if you use CE0/CE1 (recommended), otherwise set BCM pin (e.g. 5)
-#
-# SPI:
-#   /dev/spidev0.0 => bus=0 dev=0
-#   /dev/spidev0.1 => bus=0 dev=1
+# ST7789 SPI driver using spidev + lgpio (no RPi.GPIO).
+# Works reliably on RPi when RPi.GPIO throws "Cannot determine SOC peripheral base address".
 
 import time
 import spidev
-import RPi.GPIO as GPIO
+import lgpio
 
 
 class LcdSt7789:
@@ -29,7 +20,8 @@ class LcdSt7789:
         rst=24,
         cs=None,          # None => CE0/CE1 hardware CS
         invert=True,
-        madctl=0x00,      # try 0x00; if colors/axes wrong, adjust later
+        madctl=0x00,
+        gpiochip=0,       # usually 0 on RPi
     ):
         self.w = int(width)
         self.h = int(height)
@@ -45,17 +37,24 @@ class LcdSt7789:
         self.invert = bool(invert)
         self.madctl = int(madctl) & 0xFF
 
+        self.gpiochip = int(gpiochip)
+        self.gpio = lgpio.gpiochip_open(self.gpiochip)
+
         self._init_gpio()
         self._init_spi()
         self._init_panel()
 
+    def _claim_out(self, pin, initial=0):
+        lgpio.gpio_claim_output(self.gpio, pin, initial)
+
+    def _write(self, pin, v):
+        lgpio.gpio_write(self.gpio, pin, 1 if v else 0)
+
     def _init_gpio(self):
-        GPIO.setmode(GPIO.BCM)
-        GPIO.setup(self.DC, GPIO.OUT)
-        GPIO.setup(self.RST, GPIO.OUT)
+        self._claim_out(self.DC, 0)
+        self._claim_out(self.RST, 1)
         if self.CS is not None:
-            GPIO.setup(self.CS, GPIO.OUT)
-            GPIO.output(self.CS, 1)
+            self._claim_out(self.CS, 1)
 
     def _init_spi(self):
         self.spi = spidev.SpiDev()
@@ -65,30 +64,30 @@ class LcdSt7789:
 
     def _cs_low(self):
         if self.CS is not None:
-            GPIO.output(self.CS, 0)
+            self._write(self.CS, 0)
 
     def _cs_high(self):
         if self.CS is not None:
-            GPIO.output(self.CS, 1)
+            self._write(self.CS, 1)
 
     def _cmd(self, c):
-        GPIO.output(self.DC, 0)
+        self._write(self.DC, 0)
         self._cs_low()
         self.spi.writebytes([int(c) & 0xFF])
         self._cs_high()
 
     def _data(self, buf):
-        GPIO.output(self.DC, 1)
+        self._write(self.DC, 1)
         self._cs_low()
         self.spi.writebytes(list(buf))
         self._cs_high()
 
     def _reset(self):
-        GPIO.output(self.RST, 1)
+        self._write(self.RST, 1)
         time.sleep(0.05)
-        GPIO.output(self.RST, 0)
+        self._write(self.RST, 0)
         time.sleep(0.05)
-        GPIO.output(self.RST, 1)
+        self._write(self.RST, 1)
         time.sleep(0.12)
 
     def _init_panel(self):
@@ -99,10 +98,10 @@ class LcdSt7789:
         self._cmd(0x11)  # SLPOUT
         time.sleep(0.12)
 
-        self._cmd(0x3A)  # COLMOD
-        self._data([0x55])  # 16-bit color
+        self._cmd(0x3A)     # COLMOD
+        self._data([0x55])  # 16-bit
 
-        self._cmd(0x36)  # MADCTL
+        self._cmd(0x36)     # MADCTL
         self._data([self.madctl])
 
         if self.invert:
@@ -123,7 +122,6 @@ class LcdSt7789:
 
     @staticmethod
     def _rgb565_bytes(img_rgb, W, H):
-        # img_rgb: PIL.Image RGB size (W,H)
         px = img_rgb.load()
         out = bytearray(W * H * 2)
         i = 0
@@ -137,11 +135,10 @@ class LcdSt7789:
         return out
 
     def display(self, img_rgb):
-        # full frame
         self._set_window(0, 0, self.w - 1, self.h - 1)
         buf = self._rgb565_bytes(img_rgb, self.w, self.h)
 
-        GPIO.output(self.DC, 1)
+        self._write(self.DC, 1)
         self._cs_low()
         chunk = 4096
         for i in range(0, len(buf), chunk):
@@ -154,6 +151,6 @@ class LcdSt7789:
         except Exception:
             pass
         try:
-            GPIO.cleanup()
+            lgpio.gpiochip_close(self.gpio)
         except Exception:
             pass
