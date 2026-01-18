@@ -1,6 +1,16 @@
 import numpy as np
 import colorsys
 
+def serpentine_index(x, y, w=16, h=16, origin_bottom=False):
+    if origin_bottom:
+        y = (h - 1) - y
+    if (y & 1) == 0:
+        return y * w + x
+    return y * w + (w - 1 - x)
+
+idx_serp = serpentine_index
+
+
 class BarsEffect:
     """
     Filozofia:
@@ -189,6 +199,9 @@ class BarsEffect:
                 hcol = float(self._base_hue[x] + self._y_hue[y]) % 1.0
                 vcol = float(self._y_v[y])
                 r, g, b = colorsys.hsv_to_rgb(hcol, self.hsv_s, vcol)
-                frame[y * self.w + x] = (int(r * 255), int(g * 255), int(b * 255))
+                idx = idx_serp(x, y, w=self.w, h=self.h, origin_bottom=False)
+                frame[idx] = (int(r * 255), int(g * 255), int(b * 255))
 
+        
+        
         return frame
