@@ -18,7 +18,7 @@ from firmware.audio.passthrough import Passthrough
 from firmware.audio.routing import input_for_mode
 from firmware.led.engine import LedEngine
 
-from firmware.bt.gatt_server import BleGattServer
+from firmware.bt.ble_gatt_server import BleGattServer
 
 DEVICE_NAME = "Visualizer"
 
