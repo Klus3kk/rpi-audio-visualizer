@@ -35,8 +35,6 @@ class BarsEffect:
 
         # "dwa poziomy na dół" (tylko gdy jest sygnał)
         min_fill_rows=2,           # czyli y=0..1
-        signal_hold_s=0.45,   # 0.3..0.8
-        _signal_timer=0.0,
 
         # 7 kolorów (po X) + gradient po Y (stała jasność)
         palette7_hues=(0.00, 0.07, 0.14, 0.33, 0.50, 0.66, 0.83),
@@ -77,6 +75,9 @@ class BarsEffect:
         self.v_top = float(v_top)
         self.peak_boost = float(peak_boost)
         self.power_limit = float(power_limit)
+        
+        self.signal_hold_s = 0.45   # 0.3..0.8
+        self._signal_timer = 0.0
 
         if x_map is None:
             self.x_map = list(range(self.w))
