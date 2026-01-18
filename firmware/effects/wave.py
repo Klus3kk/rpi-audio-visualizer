@@ -1,3 +1,4 @@
+# firmware/effects/wave.py
 import numpy as np
 from firmware.effects.bars import serpentine_index
 from firmware.effects.palette import color_for
@@ -11,6 +12,8 @@ class WaveEffect:
         self.h = int(h)
         self.phase = 0.0
         self.t = 0.0
+
+        # stan dla stabilności
         self._amp_smooth = 0.0
 
     def update(self, features, dt, params=None):
@@ -21,26 +24,32 @@ class WaveEffect:
         w, h = self.w, self.h
         intensity  = float(params.get("intensity", 0.75))
         color_mode = params.get("color_mode", "auto")
-        power      = float(params.get("power", 1.0))
-        glow       = float(params.get("glow", 0.20))
+        power      = float(params.get("power", 0.55))   # mniejsza moc
+        glow       = float(params.get("glow", 0.18))    # delikatniej
 
         rms = float(features.get("rms", 0.0))
         bands = features.get("bands", None)
         energy = float(np.mean(bands)) if bands is not None else 0.0
 
-        mic_gain = float(params.get("mic_gain", 22.0))  # 16..30
-        a_raw = (rms * mic_gain) * (0.70 + 1.05 * intensity)
-        a_raw += 0.40 * energy
+        # --- CZUŁOŚĆ (gain na RMS) ---
+        # typowo telefon->mikrofon: rms bywa bardzo małe
+        rms_gain = float(params.get("mic_gain", 18.0))  # 12..30
+        a_raw = (rms * rms_gain) * (0.65 + 1.10 * intensity)
+
+        # trochę energii z pasm, żeby nie było “martwe” przy niskim rms
+        a_raw += 0.55 * energy * (0.35 + intensity)
+
         a_raw = _clamp01(a_raw)
 
+        # smoothing amplitudy (żeby nie skakało)
         a = float(np.exp(-dt / 0.10))
         self._amp_smooth = self._amp_smooth * a + a_raw * (1.0 - a)
 
-        # MIN amplituda: zawsze coś widać
-        amp = (h / 2.0 - 1.0) * (0.18 + 0.82 * self._amp_smooth)
+        amp = (h / 2.0 - 1.0) * self._amp_smooth
         mid = (h - 1) / 2.0
 
-        self.phase += dt * (1.4 + 5.5 * energy * (0.25 + intensity))
+        # speed: zależne od energii, ale nie za szybko
+        self.phase += dt * (1.6 + 6.0 * energy * (0.25 + intensity))
 
         frame = [(0, 0, 0)] * (w * h)
 
@@ -48,8 +57,8 @@ class WaveEffect:
             y = int(round(mid + amp * np.sin(self.phase + x * 0.60)))
             y = 0 if y < 0 else (h - 1 if y >= h else y)
 
-            # V większe (bo BRIGHTNESS=4 na ESP)
-            v = 0.35
+            # ZAWSZE rysuj coś: jeśli cisza, linia będzie blisko mid
+            v = 0.12 + 0.18 * (abs(y - mid) / max(1e-6, mid))  # niskie V
             c = color_for(v, self.t + 0.03 * x, mode=color_mode)
             c = (int(c[0] * power), int(c[1] * power), int(c[2] * power))
 
