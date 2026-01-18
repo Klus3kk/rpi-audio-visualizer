@@ -19,7 +19,6 @@ from firmware.effects.wave import WaveEffect
 
 W, H = 16, 16
 NUM_LEDS = W * H
-
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
@@ -31,8 +30,6 @@ DT_LCD = 1.0 / FPS_LCD
 
 
 def push_frame(leds: Esp32SerialDriver, frame):
-    # Esp32SerialDriver ma set_pixel(i,rgb) + show()
-    # więc kopiujemy frame do bufora i show()
     for i, rgb in enumerate(frame):
         leds.set_pixel(i, rgb)
     leds.show()
@@ -50,23 +47,22 @@ def make_effects(w=W, h=H):
 
 
 def main():
-    # LCD (luma)
     ui = LCDUI({
         "width": 240,
         "height": 320,
-        "spi_port": 0,
-        "spi_device": 0,
+        "spi_bus": 0,
+        "spi_dev": 0,          # /dev/spidev0.0
+        "spi_hz": 40_000_000,
         "dc": 25,
         "rst": 24,
-        "cs": 5,        # jeśli u Ciebie tak działało
-        "rotate": 1,    # 90deg => poziomo
-        "spi_hz": 32_000_000,
+        "cs_gpio": None,       # jeśli masz CE0/CE1 to zostaw None; jak masz ręczny CS na GPIO -> wpisz numer
+        "rotate": 90,          # poziomo
+        "invert": True,
+        "madctl_rgb": True,    # jak kolory złe -> False
     })
 
-    # LED driver (ESP32)
     leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=PORT, baud=BAUD, debug=False)
 
-    # Audio
     fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000)
     block = fe.nfft
     stream = sd.InputStream(samplerate=fe.sr, channels=1, blocksize=block, dtype="float32")
@@ -76,14 +72,13 @@ def main():
     idx = 0
     name, eff = effects[idx]
 
-    # Stan UI (tylko MIC/BT)
     mode = "MIC"
     bt_connected = False
 
     params = {
         "intensity": 0.75,
         "color_mode": "auto",
-        "power": 0.65,   # globalnie przytnij moc efektów jeśli chcesz
+        "power": 0.65,   # ogranicz “moc” efektów globalnie
         "glow": 0.25,
     }
 
@@ -96,12 +91,10 @@ def main():
             dt = now - t_prev
             t_prev = now
 
-            # audio -> features
             x, _ = stream.read(block)
             x = x[:, 0].astype(np.float32)
             feats = fe.compute(x)
 
-            # efekt -> frame
             try:
                 frame = eff.update(feats, dt, params)
             except TypeError:
@@ -112,10 +105,8 @@ def main():
                 if len(frame) != NUM_LEDS:
                     raise RuntimeError(f"{name}: frame len {len(frame)} != {NUM_LEDS}")
 
-            # LED @ 40 FPS
             push_frame(leds, frame)
 
-            # LCD @ 10 FPS (żeby nie lagowało)
             t_lcd += dt
             if t_lcd >= DT_LCD:
                 t_lcd = 0.0
@@ -124,10 +115,9 @@ def main():
                     effect=name,
                     feats=feats,
                     bt_connected=bt_connected,
-                    nowp={"artist": "", "title": ""}  # jak potem dodasz BT appkę, tu wstawisz now playing
+                    nowp={"artist": "", "title": ""},
                 )
 
-            # utrzymanie FPS
             sleep = DT_LED - (time.monotonic() - now)
             if sleep > 0:
                 time.sleep(sleep)

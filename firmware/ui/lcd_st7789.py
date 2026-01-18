@@ -1,112 +1,200 @@
 # firmware/ui/lcd_st7789.py
+import time
+import spidev
+import lgpio
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont
-from luma.core.interface.serial import spi, gpio
-from luma.lcd.device import st7789
 
+# ST7789 commands
+_SWRESET = 0x01
+_SLPOUT  = 0x11
+_COLMOD  = 0x3A
+_MADCTL  = 0x36
+_INVON   = 0x21
+_DISPON  = 0x29
+_CASET   = 0x2A
+_RASET   = 0x2B
+_RAMWR   = 0x2C
 
-NEON = (0, 200, 255)
-NEON2 = (40, 120, 255)
-BG = (0, 0, 0)
-DIM = (0, 50, 70)
+# MADCTL bits (common)
+_MX = 0x40
+_MY = 0x80
+_MV = 0x20
+_RGB = 0x00  # RGB order (często OK; jak kolory złe -> spróbuj 0x08 BGR)
 
 
 class LcdSt7789:
     """
-    Luma ST7789 wrapper.
-    KLUCZ: rysujemy zawsze w rozmiarze self.dev.size, a nie "width/height z configu".
-    To usuwa cyrki z obróconym fontem po rotate.
+    Minimalny ST7789: spidev + lgpio (bez RPi.GPIO i bez luma).
+    - Czarny background
+    - rotate 0/90/180/270
+    - szybka konwersja RGB888 -> RGB565 (numpy)
     """
 
     def __init__(
         self,
         width=240,
         height=320,
-        spi_port=0,
-        spi_device=0,
+        spi_bus=0,
+        spi_dev=0,
+        spi_hz=40_000_000,
         dc=25,
         rst=24,
-        cs=5,
-        rotate=1,         # 0/1/2/3 => 0/90/180/270
-        spi_hz=32_000_000
+        cs_gpio=None,     # jak używasz CE0/CE1, zostaw None
+        rotate=90,
+        invert=True,
+        madctl_rgb=True,  # True => RGB, False => BGR
     ):
-        serial = spi(
-            port=int(spi_port),
-            device=int(spi_device),
-            gpio=gpio(dc=int(dc), rst=int(rst)),
-            bus_speed_hz=int(spi_hz),
-        )
+        self.panel_w = int(width)
+        self.panel_h = int(height)
+        self.rotate = int(rotate)
 
-        # UWAGA: cs w luma zwykle jest pinem CE0/CE1 albo "GPIO CS" zależnie od setupu.
-        self.dev = st7789(serial, width=int(width), height=int(height), rotate=int(rotate), cs=cs)
+        # wyjściowy rozmiar “ekranu logicznego” po rotacji
+        if self.rotate in (90, 270):
+            self.w, self.h = self.panel_h, self.panel_w
+        else:
+            self.w, self.h = self.panel_w, self.panel_h
 
-        # NAJWAŻNIEJSZE: realny rozmiar po rotate
-        self.w, self.h = self.dev.size
+        self.dc = int(dc)
+        self.rst = int(rst)
+        self.cs_gpio = None if cs_gpio is None else int(cs_gpio)
+        self.spi_hz = int(spi_hz)
 
+        # lgpio chip
+        self.gpio = lgpio.gpiochip_open(0)
+        lgpio.gpio_claim_output(self.gpio, self.dc, 0)
+        lgpio.gpio_claim_output(self.gpio, self.rst, 1)
+        if self.cs_gpio is not None:
+            lgpio.gpio_claim_output(self.gpio, self.cs_gpio, 1)
+
+        # SPI
+        self.spi = spidev.SpiDev()
+        self.spi.open(int(spi_bus), int(spi_dev))
+        self.spi.max_speed_hz = self.spi_hz
+        self.spi.mode = 0
+
+        self._madctl_rgb = _RGB if madctl_rgb else 0x08  # BGR=0x08
+        self._init_panel(invert=bool(invert))
+
+        # font
         self.font = ImageFont.load_default()
 
-    def render_ui(self, *, mode: str, effect: str, feats: dict, bt_connected: bool, nowp: dict | None = None):
-        """
-        mode: "MIC" albo "BT"
-        effect: nazwa efektu
-        feats: dict z FeatureExtractor: rms, bass, mid, treble
-        nowp: opcjonalnie: {"title": "...", "artist":"...", "connected": bool}
-        """
-        mode = (mode or "MIC").upper()
-        effect = str(effect or "")
-        nowp = nowp or {}
+    # -------- low-level --------
+    def _cs(self, v: int):
+        if self.cs_gpio is not None:
+            lgpio.gpio_write(self.gpio, self.cs_gpio, 1 if v else 0)
 
-        img = Image.new("RGB", (self.w, self.h), BG)
-        d = ImageDraw.Draw(img)
+    def _dc(self, v: int):
+        lgpio.gpio_write(self.gpio, self.dc, 1 if v else 0)
 
-        # Header
-        d.rectangle([6, 6, self.w - 7, 42], outline=NEON2)
-        d.text((14, 14), "AUDIO VIS", fill=NEON, font=self.font)
+    def _rst_pulse(self):
+        lgpio.gpio_write(self.gpio, self.rst, 1)
+        time.sleep(0.05)
+        lgpio.gpio_write(self.gpio, self.rst, 0)
+        time.sleep(0.05)
+        lgpio.gpio_write(self.gpio, self.rst, 1)
+        time.sleep(0.12)
 
-        # MIC / BT buttons (Nokia-ish, prostokąty)
-        mic_on = (mode == "MIC")
-        bt_on = (mode == "BT")
+    def _cmd(self, c: int):
+        self._dc(0)
+        self._cs(0)
+        self.spi.writebytes([c & 0xFF])
+        self._cs(1)
 
-        left = [6, 52, (self.w // 2) - 4, 88]
-        right = [(self.w // 2) + 3, 52, self.w - 7, 88]
+    def _data(self, buf):
+        self._dc(1)
+        self._cs(0)
+        self.spi.writebytes(buf)
+        self._cs(1)
 
-        d.rectangle(left, outline=NEON2, fill=(NEON2 if mic_on else BG))
-        d.rectangle(right, outline=NEON2, fill=(NEON2 if bt_on else BG))
+    def _set_window(self, x0, y0, x1, y1):
+        self._cmd(_CASET)
+        self._data([(x0 >> 8) & 0xFF, x0 & 0xFF, (x1 >> 8) & 0xFF, x1 & 0xFF])
+        self._cmd(_RASET)
+        self._data([(y0 >> 8) & 0xFF, y0 & 0xFF, (y1 >> 8) & 0xFF, y1 & 0xFF])
+        self._cmd(_RAMWR)
 
-        d.text((left[0] + 14, left[1] + 10), "MIC", fill=(BG if mic_on else NEON), font=self.font)
-        d.text((right[0] + 14, right[1] + 10), "BT", fill=(BG if bt_on else NEON), font=self.font)
+    def _madctl_for_rotate(self):
+        # Typowe mapowania dla ST7789; jeśli obraz jest “dziwnie”, zmienimy MADCTL.
+        r = self.rotate % 360
+        if r == 0:
+            return self._madctl_rgb | _MX | _MY
+        if r == 90:
+            return self._madctl_rgb | _MV | _MY
+        if r == 180:
+            return self._madctl_rgb
+        if r == 270:
+            return self._madctl_rgb | _MV | _MX
+        return self._madctl_rgb | _MV | _MY
 
-        # Status lines
-        d.text((10, 102), f"EFFECT: {effect[:18]}", fill=NEON, font=self.font)
-        d.text((10, 122), f"BT: {'ON' if bt_connected else 'OFF'}", fill=(NEON if bt_connected else DIM), font=self.font)
+    def _init_panel(self, invert: bool):
+        self._rst_pulse()
 
-        # Audio meters
-        rms = float(feats.get("rms", 0.0))
-        bass = float(feats.get("bass", 0.0))
-        mid = float(feats.get("mid", 0.0))
-        treb = float(feats.get("treble", 0.0))
+        self._cmd(_SWRESET)
+        time.sleep(0.12)
+        self._cmd(_SLPOUT)
+        time.sleep(0.12)
 
-        def bar(y, label, v):
-            v = 0.0 if v < 0.0 else (1.0 if v > 1.0 else v)
-            x0, x1 = 10, self.w - 10
-            d.text((10, y - 14), label, fill=NEON2, font=self.font)
-            d.rectangle([x0, y, x1, y + 12], outline=NEON2)
-            fillw = int((x1 - x0 - 2) * v)
-            if fillw > 0:
-                d.rectangle([x0 + 1, y + 1, x0 + 1 + fillw, y + 11], fill=NEON)
+        self._cmd(_COLMOD)
+        self._data([0x55])  # 16-bit
 
-        # RMS map (czułość UI tylko do paska, nie zmienia LED)
-        rms_v = max(0.0, min(1.0, rms * 14.0))
-        bar(156, "RMS", rms_v)
-        bar(196, "BASS", bass)
-        bar(236, "MID", mid)
-        bar(276, "TREB", treb)
+        self._cmd(_MADCTL)
+        self._data([self._madctl_for_rotate()])
 
-        # Now playing (opcjonalnie; utnij, bez bajerów)
-        artist = (nowp.get("artist") or "").strip()
-        title = (nowp.get("title") or "").strip()
-        line = f"{artist} — {title}" if artist and title else (title or artist or "")
-        if len(line) > 26:
-            line = line[:25] + "…"
-        d.text((10, self.h - 20), line, fill=DIM, font=self.font)
+        if invert:
+            self._cmd(_INVON)
+            time.sleep(0.01)
 
-        self.dev.display(img)
+        self._cmd(_DISPON)
+        time.sleep(0.12)
+
+        self.fill((0, 0, 0))
+
+    # -------- drawing --------
+    @staticmethod
+    def _rgb888_to_rgb565_bytes(img: Image.Image) -> bytes:
+        a = np.asarray(img.convert("RGB"), dtype=np.uint8)  # (h,w,3)
+        r = a[:, :, 0].astype(np.uint16)
+        g = a[:, :, 1].astype(np.uint16)
+        b = a[:, :, 2].astype(np.uint16)
+        v = ((r & 0xF8) << 8) | ((g & 0xFC) << 3) | (b >> 3)  # uint16 (h,w)
+        out = np.empty((v.size * 2,), dtype=np.uint8)
+        out[0::2] = (v.reshape(-1) >> 8).astype(np.uint8)
+        out[1::2] = (v.reshape(-1) & 0xFF).astype(np.uint8)
+        return out.tobytes()
+
+    def display(self, img: Image.Image):
+        # img MUSI mieć (self.w, self.h)
+        if img.size != (self.w, self.h):
+            img = img.resize((self.w, self.h))
+
+        # wysyłamy zawsze do panelowego okna (0..panel_w-1, 0..panel_h-1)
+        # bo MADCTL załatwia rotację
+        self._set_window(0, 0, self.panel_w - 1, self.panel_h - 1)
+        buf = self._rgb888_to_rgb565_bytes(img)
+
+        self._dc(1)
+        self._cs(0)
+        # chunking
+        chunk = 4096
+        for i in range(0, len(buf), chunk):
+            self.spi.writebytes(buf[i:i + chunk])
+        self._cs(1)
+
+    def fill(self, rgb=(0, 0, 0)):
+        img = Image.new("RGB", (self.w, self.h), tuple(rgb))
+        self.display(img)
+
+    def close(self):
+        try:
+            self.fill((0, 0, 0))
+        except Exception:
+            pass
+        try:
+            self.spi.close()
+        except Exception:
+            pass
+        try:
+            lgpio.gpiochip_close(self.gpio)
+        except Exception:
+            pass
