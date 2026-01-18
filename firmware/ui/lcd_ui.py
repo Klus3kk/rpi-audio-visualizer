@@ -161,7 +161,7 @@ class LCDUI:
         self._cmd(0x3A); self._data([0x55])  # 16-bit
 
         # MADCTL: zostaw prosty (rotację robimy PIL rotate)
-        self._cmd(0x36); self._data([0x00])
+        self._cmd(0x36); self._data([0x40])
 
         # INVON często potrzebne
         self._cmd(0x21); time.sleep(0.01)
@@ -306,8 +306,14 @@ class LCDUI:
         dot_x = 240 + int(20 * (0.5 + 0.5 * math.sin(t * 3.0)))
         d.rectangle((dot_x, 206, dot_x + 10, 216), fill=ACC)
 
-        # rotate to panel
+        from PIL import ImageOps  # na górze pliku
+
         out = img.rotate(self.rotate, expand=True)  # -> 240x320
+
+        # FIX MIRROR (wybierz jedno):
+        out = ImageOps.mirror(out)     # odbicie lewo-prawo (najczęstsze)
+        # out = ImageOps.flip(out)     # odbicie góra-dół (rzadziej)
+
         if out.size != (self.WP, self.HP):
             out = out.resize((self.WP, self.HP))
         self._display_240x320(out)
