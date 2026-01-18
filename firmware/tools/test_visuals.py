@@ -1,11 +1,10 @@
-# firmware/tools/test_visualizations.py
+# firmware/tools/test_visuals.py
 # Uruchom:
-#   python3 -u -m firmware.tools.test_visualizations
-#
-# Co 5 sekund przełącza efekt i wysyła klatki na ESP32.
+#   python3 -u -m firmware.tools.test_visuals
 
 import time
 import inspect
+import numpy as np
 
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 from firmware.audio.features import FeatureExtractor
@@ -29,10 +28,6 @@ DT_TARGET = 1.0 / FPS
 
 
 def make_driver(DriverCls, *, port, baud, num_leds, w=None, h=None):
-    """
-    Buduje Esp32SerialDriver używając WYŁĄCZNIE poprawnych nazw z sygnatury __init__.
-    Dzięki temu nie ma "multiple values for argument".
-    """
     sig = inspect.signature(DriverCls.__init__)
     params = list(sig.parameters.keys())
     if params and params[0] == "self":
@@ -69,29 +64,38 @@ def make_effects(w=W, h=H):
 
 
 def main():
+    # --- LED driver (bez konfliktów argumentów)
     leds = make_driver(Esp32SerialDriver, port=PORT, baud=BAUD, num_leds=NUM_LEDS, w=W, h=H)
 
-    fe = FeatureExtractor()
-    effects = make_effects()
+    # --- FeatureExtractor: on potrzebuje surowych próbek audio x
+    fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000)
 
-    params = {
-        "intensity": 0.75,
-        "color_mode": "auto",
-        "power": 0.85,
-        "glow": 0.30,
-    }
+    # --- Audio input (sounddevice)
+    import sounddevice as sd
+
+    block = fe.nfft  # dokładnie tyle próbek ile FFT
+    stream = sd.InputStream(
+        samplerate=fe.sr,
+        channels=1,
+        blocksize=block,
+        dtype="float32",
+    )
+    stream.start()
+
+    effects = make_effects()
+    params = {"intensity": 0.75, "color_mode": "auto"}
 
     idx = 0
     cur_name, cur = effects[idx]
     t_switch = time.monotonic() + SWITCH_EVERY_S
-    t_prev = time.monotonic()
 
     print(f"[tester] start -> {cur_name}")
 
+    last = time.monotonic()
     while True:
         now = time.monotonic()
-        dt = now - t_prev
-        t_prev = now
+        dt = now - last
+        last = now
 
         if now >= t_switch:
             idx = (idx + 1) % len(effects)
@@ -99,11 +103,12 @@ def main():
             t_switch = now + SWITCH_EVERY_S
             print(f"[tester] -> {cur_name}")
 
-        # audio -> features
-        if hasattr(fe, "update"):
-            features = fe.update(dt)
-        else:
-            features = fe.get_features(dt)
+        # czytaj audio -> x
+        x, _ = stream.read(block)          # (block, 1)
+        x = x[:, 0].astype(np.float32)     # (block,)
+
+        # features z Twojego FE
+        features = fe.compute(x)
 
         # efekt -> frame
         try:
@@ -118,7 +123,6 @@ def main():
 
         leds.show(frame)
 
-        # stałe FPS
         sleep = DT_TARGET - (time.monotonic() - now)
         if sleep > 0:
             time.sleep(sleep)
