@@ -51,7 +51,7 @@ def main():
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
-        rotate=90,
+        rotate=270,
         mirror=True,          # jeśli nadal “w drugą stronę” -> zmień na False
         panel_invert=False,   # czarne tło poprawnie
         dim=0.85,
