@@ -30,6 +30,7 @@ class LCDUI:
         font_size=18,
         font_size_big=28,
         accent=(0, 180, 255),
+        invert=True,
         bg=(0, 0, 0),
         dim=0.75,           # przyciemnia UI (0..1)
     ):
@@ -52,6 +53,8 @@ class LCDUI:
         self.bg = tuple(bg)
         self.accent = tuple(accent)
         self.dim = float(dim)
+        self.invert = bool(invert)
+
 
         # state
         self.mode = "mic"          # mic/bt
