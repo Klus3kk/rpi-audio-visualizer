@@ -82,6 +82,7 @@ def main():
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
+        inverse=True,
         rotate=270,
         mirror=True,              # jeśli lustrzane -> False
         panel_invert=True,        # jeśli kolory złe -> False
