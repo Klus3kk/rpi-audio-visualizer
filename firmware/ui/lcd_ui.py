@@ -7,11 +7,10 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps
 
 class LCDUI:
     """
-    Minimalny Nokia-like UI na ST7789 (SPI):
+    Minimalny Nokia-like neon UI na ST7789:
     - tylko MIC / BT
-    - czarne tło + neon-cyan
-    - spidev + lgpio
-    - wspiera MIRROR (lustrzane odbicie) i panel inversion (INVON/INVOFF)
+    - czarne tło + neon blue
+    - spidev + lgpio (bez luma, bez RPi.GPIO)
     """
 
     def __init__(
@@ -22,16 +21,18 @@ class LCDUI:
         spi_hz=24_000_000,
         dc=25,
         rst=24,
-        cs_gpio=5,            # None jeśli używasz sprzętowego CE0/CE1
-        rotate=90,            # 90 lub 270 (jak Ci pasuje)
-        mirror=False,         # <-- TO jest "invert na drugą stronę" (lustrzane odbicie)
-        panel_invert=False,   # <-- jeśli tło wychodzi białe: ustaw False (INVOFF)
+        cs_gpio=5,          # None jeśli używasz sprzętowego CE0/CE1
+        rotate=270,         # 90/270 - u Ciebie działa 270
+        mirror=True,        # jeśli lustrzane: False
+        panel_invert=True,  # jeśli kolory "odwrócone": True/False
         w_panel=240,
         h_panel=320,
         font_path="/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        font_size=16,
-        font_size_big=22,
-        dim=0.85,
+        font_size=13,
+        font_size_big=18,
+        accent=(30, 140, 255),   # <-- TERAZ DZIAŁA (BLUE)
+        bg=(0, 0, 0),
+        dim=0.90,
     ):
         self.spi_bus = int(spi_bus)
         self.spi_dev = int(spi_dev)
@@ -48,14 +49,16 @@ class LCDUI:
         self.WP = int(w_panel)
         self.HP = int(h_panel)
 
-        # rysujemy logicznie w LANDSCAPE 320x240 i potem robimy rotate/mirror -> 240x320
+        # rysujemy logicznie 320x240 (landscape), potem obrót -> 240x320
         self.W = 320
         self.H = 240
 
+        self.bg = tuple(bg)
+        self.accent = tuple(accent)
         self.dim = float(dim)
 
-        # ---- state (to będziesz ustawiać z runnera) ----
-        self.mode = "mic"            # "mic" / "bt"
+        # state
+        self.mode = "mic"          # mic/bt
         self.effect = "bars"
         self.intensity = 0.75
         self.color_mode = "auto"
@@ -65,20 +68,18 @@ class LCDUI:
         self.mid = 0.0
         self.treble = 0.0
 
-        self.bt_connected = False
+        self.status = ""
         self.bt_name = ""
         self.bt_addr = ""
-
+        self.bt_connected = False
         self.artist = ""
         self.title = ""
-
-        self.status = ""             # krótka linia statusu
 
         # fonts
         try:
             self.font = ImageFont.truetype(font_path, font_size)
             self.font_big = ImageFont.truetype(font_path, font_size_big)
-            self.font_small = ImageFont.truetype(font_path, 13)
+            self.font_small = ImageFont.truetype(font_path, max(10, font_size - 2))
         except Exception:
             self.font = ImageFont.load_default()
             self.font_big = ImageFont.load_default()
@@ -100,39 +101,44 @@ class LCDUI:
         self._init_st7789()
         self._fill_black()
 
-    # ---------------- public setters ----------------
+    # -------- public API --------
     def set_mode(self, mode: str):
         self.mode = "bt" if str(mode).lower() == "bt" else "mic"
 
     def set_effect(self, effect: str):
-        self.effect = (effect or "")[:20] or "bars"
+        self.effect = (effect or "")[:12]
 
-    def set_visual_params(self, *, intensity=None, color_mode=None):
-        if intensity is not None:
+    def set_visual_params(self, *, intensity: float, color_mode: str = "auto"):
+        try:
             x = float(intensity)
-            if x < 0.0: x = 0.0
-            if x > 1.0: x = 1.0
-            self.intensity = x
-        if color_mode is not None:
-            self.color_mode = str(color_mode)[:12]
+        except Exception:
+            x = self.intensity
+        if x < 0.0: x = 0.0
+        if x > 1.0: x = 1.0
+        self.intensity = x
 
-    def set_mic_feats(self, *, rms=0.0, bass=0.0, mid=0.0, treble=0.0):
+        cm = str(color_mode or "auto").lower()
+        if cm not in ("auto", "rainbow", "mono"):
+            cm = "auto"
+        self.color_mode = cm
+
+    def set_mic_feats(self, *, rms: float, bass: float, mid: float, treble: float):
         self.rms = float(rms)
         self.bass = float(bass)
         self.mid = float(mid)
         self.treble = float(treble)
 
+    def set_status(self, text: str):
+        self.status = (text or "")[:34]
+
     def set_bt(self, *, connected: bool, device_name: str = "", device_addr: str = ""):
         self.bt_connected = bool(connected)
         self.bt_name = (device_name or "")[:22]
-        self.bt_addr = (device_addr or "")[:24]
+        self.bt_addr = (device_addr or "")[:22]
 
     def set_track(self, *, artist: str = "", title: str = ""):
-        self.artist = (artist or "")[:24]
-        self.title = (title or "")[:24]
-
-    def set_status(self, text: str):
-        self.status = (text or "")[:28]
+        self.artist = (artist or "")[:18]
+        self.title = (title or "")[:18]
 
     def close(self):
         try:
@@ -144,7 +150,7 @@ class LCDUI:
         except Exception:
             pass
 
-    # ---------------- low-level HW ----------------
+    # -------- HW helpers --------
     def _w(self, pin, val):
         lgpio.gpio_write(self.gh, pin, 1 if val else 0)
 
@@ -180,15 +186,18 @@ class LCDUI:
         self._cmd(0x01); time.sleep(0.12)  # SWRESET
         self._cmd(0x11); time.sleep(0.12)  # SLPOUT
         self._cmd(0x3A); self._data([0x55])  # 16-bit
-        self._cmd(0x36); self._data([0x00])  # MADCTL zostaw
-        # WAŻNE: panel inversion (kolory). Jak tło wychodzi białe -> INVOFF (0x20)
-        self._cmd(0x21 if self.panel_invert else 0x20)
-        time.sleep(0.01)
+        self._cmd(0x36); self._data([0x00])  # MADCTL (rotację robimy w PIL)
+        if self.panel_invert:
+            self._cmd(0x21)  # INVON
+        else:
+            self._cmd(0x20)  # INVOFF
         self._cmd(0x29); time.sleep(0.12)  # DISPON
 
     def _set_window(self, x0, y0, x1, y1):
-        self._cmd(0x2A); self._data([x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF])
-        self._cmd(0x2B); self._data([y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF])
+        self._cmd(0x2A)
+        self._data([x0 >> 8, x0 & 0xFF, x1 >> 8, x1 & 0xFF])
+        self._cmd(0x2B)
+        self._data([y0 >> 8, y0 & 0xFF, y1 >> 8, y1 & 0xFF])
         self._cmd(0x2C)
 
     def _img_to_rgb565(self, img240x320: Image.Image) -> bytearray:
@@ -219,103 +228,95 @@ class LCDUI:
         img = Image.new("RGB", (self.WP, self.HP), (0, 0, 0))
         self._display_240x320(img)
 
-    # ---------------- drawing ----------------
+    # -------- drawing helpers --------
     @staticmethod
-    def _clamp8(v: int) -> int:
-        return 0 if v < 0 else (255 if v > 255 else v)
+    def _clamp8(x: int) -> int:
+        return 0 if x < 0 else (255 if x > 255 else x)
 
-    def _mul(self, rgb, k: float):
+    def _mul(self, c, k):
         return (
-            self._clamp8(int(rgb[0] * k)),
-            self._clamp8(int(rgb[1] * k)),
-            self._clamp8(int(rgb[2] * k)),
+            self._clamp8(int(c[0] * k)),
+            self._clamp8(int(c[1] * k)),
+            self._clamp8(int(c[2] * k)),
         )
 
-    def _cut(self, s: str, n: int) -> str:
+    @staticmethod
+    def _ell(s: str, n: int) -> str:
         s = (s or "").strip()
-        if len(s) <= n:
-            return s
-        return s[: n - 1] + "…"
+        return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
 
     def render(self):
-        accent=(30, 140, 255),
-        # neon palette (czarno-niebieskie)
-        BG   = (0, 0, 0)
-        ACC  = self._mul(self.accent, self.dim)
-        ACC2 = self._mul((self.accent[0]//3, self.accent[1]//3, self.accent[2]//3), self.dim)
-        TXT  = self._mul((220, 235, 255), self.dim)
-        SUB  = self._mul((100, 130, 155), self.dim)
-        GRID = self._mul((0, 45, 70), self.dim)
+        # colors
+        ACC = self._mul(self.accent, self.dim)
+        ACC2 = self._mul(self.accent, self.dim * 0.40)
+        TXT = self._mul((230, 240, 255), self.dim)
+        SUB = self._mul((110, 130, 150), self.dim)
+        GRID = self._mul((0, 50, 90), self.dim)
 
-        img = Image.new("RGB", (self.W, self.H), BG)
+        img = Image.new("RGB", (self.W, self.H), self.bg)
         d = ImageDraw.Draw(img)
 
-        # header (kanciaste, "Nokia")
-        d.rectangle((0, 0, self.W - 1, 40), fill=BG, outline=GRID, width=2)
-        d.text((10, 9), "VISUALIZER", fill=TXT, font=self.font)
+        # header (no animation)
+        d.rectangle((0, 0, self.W - 1, 34), fill=(0, 0, 0), outline=GRID, width=2)
+        d.text((10, 7), "VISUALIZER", fill=TXT, font=self.font)
+        d.text((170, 7), self._ell(f"FX:{self.effect}", 12), fill=SUB, font=self.font)
 
-        # status (jedna linia)
-        if self.status:
-            d.text((140, 11), self._cut(self.status, 18), fill=SUB, font=self.font_small)
+        # tabs
+        tab_y0, tab_y1 = 40, 72
 
-        # mode badge
-        badge = "MIC" if self.mode == "mic" else "BT"
-        d.rectangle((self.W - 64, 8, self.W - 10, 32), fill=BG, outline=ACC, width=2)
-        d.text((self.W - 52, 12), badge, fill=ACC, font=self.font)
+        def tab(x0, label, active):
+            x1 = x0 + 90
+            d.rectangle(
+                (x0, tab_y0, x1, tab_y1),
+                fill=(0, 0, 0),
+                outline=(ACC if active else GRID),
+                width=(3 if active else 2),
+            )
+            d.text((x0 + 18, tab_y0 + 9), label, fill=(ACC if active else SUB), font=self.font)
 
-        # main frame
-        d.rectangle((10, 52, self.W - 10, self.H - 10), fill=BG, outline=GRID, width=2)
+        tab(10, "MIC", self.mode == "mic")
+        tab(110, "BT", self.mode == "bt")
 
-        # effect line
-        d.text((18, 60), "EFFECT", fill=SUB, font=self.font_small)
-        d.text((18, 78), self._cut(self.effect.upper(), 14), fill=TXT, font=self.font_big)
+        # main panel
+        d.rectangle((10, 78, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)
 
-        # intensity + color_mode
-        d.text((18, 110), f"INT {self.intensity:.2f}   CLR {self.color_mode}", fill=SUB, font=self.font_small)
-        self._draw_bar(d, 18, 128, 150, 12, self.intensity, ACC, GRID)
+        # left: audio meters
+        d.text((18, 86), "AUDIO", fill=ACC, font=self.font)
+        d.text((18, 106), f"RMS {self.rms:.3f}", fill=TXT, font=self.font_small)
+        d.text((18, 124), f"B  {self.bass:.2f}", fill=SUB, font=self.font_small)
+        d.text((18, 140), f"M  {self.mid:.2f}", fill=SUB, font=self.font_small)
+        d.text((18, 156), f"T  {self.treble:.2f}", fill=SUB, font=self.font_small)
 
-        # right panel content depends on mode
+        # right: mode info
+        rx = 150
+        d.text((rx, 86), "MODE", fill=ACC, font=self.font)
         if self.mode == "mic":
-            d.text((190, 60), "MIC INPUT", fill=ACC, font=self.font)
-            d.text((190, 86), f"RMS {self.rms:.4f}", fill=TXT, font=self.font_small)
-            d.text((190, 106), f"B {self.bass:.2f}", fill=SUB, font=self.font_small)
-            d.text((190, 124), f"M {self.mid:.2f}", fill=SUB, font=self.font_small)
-            d.text((190, 142), f"T {self.treble:.2f}", fill=SUB, font=self.font_small)
+            d.text((rx, 106), "MIC INPUT", fill=TXT, font=self.font_small)
+            d.text((rx, 124), self._ell(self.status or "mic mode", 18), fill=SUB, font=self.font_small)
         else:
-            d.text((190, 60), "BLUETOOTH", fill=ACC, font=self.font)
             st = "CONNECTED" if self.bt_connected else "IDLE"
-            d.text((190, 86), st, fill=(ACC if self.bt_connected else SUB), font=self.font_small)
-
+            d.text((rx, 106), f"BT {st}", fill=(ACC if self.bt_connected else SUB), font=self.font_small)
             if self.bt_name:
-                d.text((190, 106), self._cut(self.bt_name, 16), fill=TXT, font=self.font_small)
+                d.text((rx, 124), self._ell(self.bt_name, 18), fill=TXT, font=self.font_small)
             if self.bt_addr:
-                d.text((190, 124), self._cut(self.bt_addr, 18), fill=SUB, font=self.font_small)
+                d.text((rx, 140), self._ell(self.bt_addr, 18), fill=SUB, font=self.font_small)
 
-            # now playing (artist + title)
-            line = ""
-            if self.artist and self.title:
-                line = f"{self.artist} - {self.title}"
-            else:
-                line = self.title or self.artist
+            if self.artist or self.title:
+                d.text((rx, 160), "NOW", fill=ACC, font=self.font_small)
+                d.text((rx, 176), self._ell(self.artist, 18), fill=TXT, font=self.font_small)
+                d.text((rx, 192), self._ell(self.title, 18), fill=TXT, font=self.font_small)
 
-            d.text((18, 158), "NOW PLAYING", fill=SUB, font=self.font_small)
-            d.rectangle((18, 176, self.W - 18, 228), fill=BG, outline=ACC2, width=2)
-            d.text((26, 188), self._cut(line, 28), fill=TXT, font=self.font)
+        # bottom status strip
+        d.rectangle((10, self.H - 38, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)
+        d.text((18, self.H - 32), f"INT {self.intensity:.2f}", fill=SUB, font=self.font_small)
+        d.text((92, self.H - 32), f"CLR {self.color_mode}", fill=SUB, font=self.font_small)
 
-        # --- transform to panel: mirror + rotate ---
-        out = img
+        # rotate + mirror to panel
+        out = img.rotate(self.rotate, expand=True)
         if self.mirror:
-            out = ImageOps.mirror(out)  # <-- lustrzane odbicie (to czego chcesz)
-        out = out.rotate(self.rotate, expand=True)  # -> 240x320 (zależnie od rotate)
+            out = ImageOps.mirror(out)
+
         if out.size != (self.WP, self.HP):
             out = out.resize((self.WP, self.HP))
 
         self._display_240x320(out)
-
-    def _draw_bar(self, d, x, y, w, h, v, fill, outline):
-        if v < 0.0: v = 0.0
-        if v > 1.0: v = 1.0
-        d.rectangle((x, y, x + w, y + h), fill=(0, 0, 0), outline=outline, width=2)
-        fw = int((w - 4) * v)
-        if fw > 0:
-            d.rectangle((x + 2, y + 2, x + 2 + fw, y + h - 2), fill=fill)
