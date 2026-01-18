@@ -1,135 +1,174 @@
 import numpy as np
 import colorsys
 
-def serpentine_index(x, y, w=16, h=16, origin_bottom=True):
-    # x: 0..w-1 (lewo->prawo)
-    # y: 0..h-1 (dół->góra w logice efektu)
-    if origin_bottom:
-        y = (h - 1) - y
-    if (y % 2) == 0:
-        return y * w + x
-    return y * w + (w - 1 - x)
-
-
 class BarsEffect:
     """
     Filozofia:
-    - X = częstotliwość (lewo->prawo)
-    - Y = poziom (wysokość słupka)
-    - Jasność (V w HSV) jest STAŁA i nie zależy od głośności.
-      Głośność wpływa tylko na wysokość.
-    - Cisza -> czarno (brak "tańca" po wyłączeniu mikrofonu)
+    - X: 16 pasm częstotliwości (lewo->prawo, niskie->wysokie)
+    - Y: poziom (wysokość)
+    - Jasność STAŁA (nie rośnie po puknięciu w mikrofon).
+      Audio wpływa tylko na wysokość.
+    - Cisza = czarne (brak “tańca” po wyciszeniu).
+    - Mapowanie LED: efekt zwraca frame w porządku row-major:
+        idx = y*w + x  (y=0 dół, y rośnie do góry)
+      Serpentine robi ESP32.
     """
 
     def __init__(
         self,
         w=16,
         h=16,
-        # stabilność:
-        attack=0.55,          # 0..1 (większe = szybciej rośnie do targetu)
-        decay_px_per_s=7.0,   # px/s opadania słupka
-        peak_decay_px_per_s=3.5,
-        # gate (żeby cisza była czarna):
-        bar_gate=0.035,       # wartości bands < gate -> 0 (ustaw 0.02..0.06)
-        # stała jasność koloru:
-        hsv_v=0.35,           # stała "jasność" koloru 0..1 (niezależna od audio)
-        hsv_s=1.0,            # saturacja
-        # opcjonalnie: minimalny poziom jeśli ma być "delikatne tło" (u Ciebie raczej 0.0)
+        # reakcja:
+        attack=0.55,              # 0..1, większe = szybciej rośnie do targetu
+        decay_px_per_s=9.0,       # px/s opadania
+        peak_decay_px_per_s=5.0,
+        # gate ciszy:
+        gate=0.06,                # 0.02..0.12 (zależy od mikrofonu)
+        # jasność stała:
+        hsv_v=0.22,               # 0..1 (realnie 0.15..0.35)
+        hsv_s=1.0,
+        # pasma:
+        band_hz=1250.0,           # 20k/16 = 1250 Hz
+        fmax=20000.0,
         floor_px=0.0,
     ):
         self.w = int(w)
         self.h = int(h)
 
-        self.level = np.zeros(self.w, dtype=np.float32)  # w pikselach
+        self.level = np.zeros(self.w, dtype=np.float32)
         self.peak  = np.zeros(self.w, dtype=np.float32)
 
         self.attack = float(attack)
         self.decay = float(decay_px_per_s)
         self.peak_decay = float(peak_decay_px_per_s)
 
-        self.bar_gate = float(bar_gate)
-
+        self.gate = float(gate)
         self.hsv_v = float(hsv_v)
         self.hsv_s = float(hsv_s)
+
+        self.band_hz = float(band_hz)
+        self.fmax = float(fmax)
         self.floor_px = float(floor_px)
 
+        # precompute stałych kolorów (żeby nie liczyć HSV w każdej klatce)
+        self._colors = []
+        for x in range(self.w):
+            hue = x / max(1, self.w - 1)
+            r, g, b = colorsys.hsv_to_rgb(hue, self.hsv_s, self.hsv_v)
+            self._colors.append((int(r * 255), int(g * 255), int(b * 255)))
+
+    def _bands_1250hz(self, mag: np.ndarray, sr: int, nfft: int) -> np.ndarray:
+        """
+        mag: |rfft|, length nfft//2 + 1, mag[0]=DC
+        Zwraca 16 wartości 0..1, każda to energia w pasmie 1250 Hz.
+        """
+        nyq = sr * 0.5
+        fmax = min(self.fmax, nyq)
+        if fmax <= 0:
+            return np.zeros(self.w, dtype=np.float32)
+
+        # pasma: [0..1250), [1250..2500), ..., [18750..20000)
+        out = np.zeros(self.w, dtype=np.float32)
+
+        # freqs per bin
+        hz_per_bin = sr / float(nfft)
+
+        for i in range(self.w):
+            lo_hz = i * self.band_hz
+            hi_hz = min((i + 1) * self.band_hz, fmax)
+
+            lo = int(np.floor(lo_hz / hz_per_bin))
+            hi = int(np.floor(hi_hz / hz_per_bin))
+
+            lo = max(1, lo)                  # pomijamy DC
+            hi = min(hi, mag.shape[0] - 1)
+
+            if hi <= lo:
+                out[i] = 0.0
+            else:
+                out[i] = float(np.mean(mag[lo:hi]))
+
+        # kompresja dynamiczna i normalizacja klatkowa (stabilniejsza niż goły mean)
+        out = np.log1p(out).astype(np.float32)
+
+        m = float(np.max(out))
+        if m > 1e-9:
+            out = out / m
+        else:
+            out[:] = 0.0
+
+        return out
+
     def update(self, features, dt, params=None):
-        # params opcjonalne (żeby pasowało do Twojego LedEngine)
         if params is None:
             params = {}
 
-        intensity = float(params.get("intensity", 1.0))  # wpływa TYLKO na wysokość, nie na jasność
-        w, h = self.w, self.h
+        intensity = float(params.get("intensity", 1.0))  # wpływa tylko na wysokość
+        sr = int(features.get("samplerate", 44100))
+        nfft = int(features.get("nfft", 1024))
 
-        bands = features.get("bands", None)
-        if bands is None:
-            return [(0, 0, 0)] * (w * h)
-
-        bands = np.asarray(bands, dtype=np.float32)
-
-        # resample bands -> 16 kolumn
-        if bands.shape[0] != w:
-            xi = np.linspace(0, bands.shape[0] - 1, w)
-            vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
+        # potrzebujemy FFT albo chociaż mag. Jeśli masz tylko bands w features -> użyj tego fallbackowo.
+        mag = features.get("mag", None)  # jeśli dodasz w FeatureExtractor
+        if mag is not None:
+            mag = np.asarray(mag, dtype=np.float32)
+            vals = self._bands_1250hz(mag, sr, nfft)
         else:
-            vals = bands
+            # fallback: jak masz features["bands"] (np. geomspace), to tylko resampluj
+            bands = features.get("bands", None)
+            if bands is None:
+                return [(0, 0, 0)] * (self.w * self.h)
+            bands = np.asarray(bands, dtype=np.float32)
+            if bands.shape[0] != self.w:
+                xi = np.linspace(0, bands.shape[0] - 1, self.w)
+                vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
+            else:
+                vals = bands
 
-        # clamp + gate (cisza = czarno)
-        vals = np.clip(vals, 0.0, 1.0)
-        vals[vals < self.bar_gate] = 0.0
+            vals = np.clip(vals, 0.0, 1.0)
 
-        # intensywność wpływa na wysokość (ale nie na jasność koloru!)
-        vals = np.clip(vals * (0.65 + 1.35 * intensity), 0.0, 1.0)
+        # gate ciszy (najważniejsze dla “nie rusza się po wyciszeniu”)
+        vals[vals < self.gate] = 0.0
 
-        # target w pikselach
-        target = vals * (h - 1)
+        # intensity tylko skaluje wysokość, NIE jasność
+        vals = np.clip(vals * (0.55 + 1.45 * intensity), 0.0, 1.0)
 
-        # stabilizacja w czasie
+        target = vals * (self.h - 1)
+
         dt = float(dt)
         fall = self.decay * dt
         peak_fall = self.peak_decay * dt
-
-        # attack: szybkie dojście do targetu bez skoków
         a = self.attack
-        for x in range(w):
+
+        for x in range(self.w):
             if target[x] > self.level[x]:
-                # interpolacja zamiast skoku
                 self.level[x] = (1.0 - a) * self.level[x] + a * target[x]
             else:
                 self.level[x] = max(self.floor_px, self.level[x] - fall)
 
-            # peak
             if self.level[x] > self.peak[x]:
                 self.peak[x] = self.level[x]
             else:
                 self.peak[x] = max(self.floor_px, self.peak[x] - peak_fall)
 
-        # budowa ramki
-        frame = [(0, 0, 0)] * (w * h)
+        # budowa ramki: row-major, y=0 dół
+        frame = [(0, 0, 0)] * (self.w * self.h)
 
-        # stała jasność koloru (V) = nie oślepia po puknięciu
-        V = self.hsv_v
-        S = self.hsv_s
-
-        for x in range(w):
+        for x in range(self.w):
             hh = int(round(self.level[x]))
             py = int(round(self.peak[x]))
 
-            # kolor po X (lewo->prawo)
-            hue = x / max(1, (w - 1))
-            r, g, b = [int(c * 255) for c in colorsys.hsv_to_rgb(hue, S, V)]
+            r, g, b = self._colors[x]
 
-            # słupek: od dołu do hh
             if hh > 0:
                 for y in range(hh + 1):
-                    idx = serpentine_index(x, y, w=w, h=h, origin_bottom=True)
+                    idx = y * self.w + x
                     frame[idx] = (r, g, b)
 
-            # peak: delikatnie jaśniejszy (ale dalej ograniczony)
-            if 0 <= py < h and py > 0:
-                pidx = serpentine_index(x, py, w=w, h=h, origin_bottom=True)
-                frame[pidx] = (min(255, int(r * 1.35)),
-                               min(255, int(g * 1.35)),
-                               min(255, int(b * 1.35)))
+            if 0 <= py < self.h and py > 0:
+                pidx = py * self.w + x
+                # peak trochę jaśniejszy, ale nadal ograniczony
+                frame[pidx] = (min(255, int(r * 1.25)),
+                               min(255, int(g * 1.25)),
+                               min(255, int(b * 1.25)))
 
         return frame

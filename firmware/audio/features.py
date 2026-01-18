@@ -74,4 +74,8 @@ class FeatureExtractor:
             "bass": bass,
             "mid": mid,
             "treble": treble,
+            "samplerate": self.sr,
+            "nfft": self.nfft,
+            "mag": mag2,          
         }
+
