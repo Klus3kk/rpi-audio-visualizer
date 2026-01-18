@@ -43,35 +43,18 @@ static uint16_t got = 0;
 static uint8_t payload[NUM_LEDS * 3];
 static uint32_t lastOkFrameMs = 0;
 
-// static void applyPayload() {
-//   int p = 0;
-//   for (int y = 0; y < HEIGHT; y++) {
-//     for (int x = 0; x < WIDTH; x++) {
-//       uint8_t r = payload[p++];
-//       uint8_t g = payload[p++];
-//       uint8_t b = payload[p++];
-//       leds[XY((uint8_t)x, (uint8_t)y)] = CRGB(r, g, b);
-//     }
-//   }
-//   FastLED.show();
-// }
-
 static void applyPayload() {
   int p = 0;
-
-  // payload: row-major, y=0 to bottom, y=15 to top
   for (int y = 0; y < HEIGHT; y++) {
-    int physY = (HEIGHT - 1) - y;  // flip: logical bottom->physical top
     for (int x = 0; x < WIDTH; x++) {
       uint8_t r = payload[p++];
       uint8_t g = payload[p++];
       uint8_t b = payload[p++];
-      leds[XY((uint8_t)x, (uint8_t)physY)] = CRGB(r, g, b);
+      leds[XY((uint8_t)x, (uint8_t)y)] = CRGB(r, g, b);
     }
   }
   FastLED.show();
 }
-
 
 void setup() {
   Serial.begin(SERIAL_BAUD);
