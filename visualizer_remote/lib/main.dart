@@ -586,57 +586,6 @@ class _RootState extends State<Root> {
                           ],
                         ),
                       ),
-
-                      const SizedBox(height: 12),
-
-                      CutPanel(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Text('BT SETTINGS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                            const SizedBox(height: 10),
-                            TextField(
-                              controller: TextEditingController(text: desired.deviceAddr),
-                              decoration: const InputDecoration(
-                                labelText: 'PHONE MAC (A2DP / BlueALSA)',
-                                border: OutlineInputBorder(),
-                                hintText: 'BC:A0:80:E0:B9:4E',
-                              ),
-                              onChanged: (v) {
-                                ble.desired.value = desired.copyWith(deviceAddr: v.trim());
-                                _debounced(const Duration(milliseconds: 300), () {
-                                  if (ble.status.value == ConnStatus.connected) {
-                                    ble.sendPatch({'device_addr': v.trim()});
-                                  }
-                                });
-                              },
-                            ),
-                            const SizedBox(height: 10),
-                            TextField(
-                              controller: TextEditingController(text: desired.artist),
-                              decoration: const InputDecoration(labelText: 'ARTIST (optional)', border: OutlineInputBorder()),
-                              onChanged: (v) {
-                                ble.desired.value = desired.copyWith(artist: v);
-                                _debounced(const Duration(milliseconds: 300), () {
-                                  if (ble.status.value == ConnStatus.connected) ble.sendPatch({'artist': v});
-                                });
-                              },
-                            ),
-                            const SizedBox(height: 10),
-                            TextField(
-                              controller: TextEditingController(text: desired.title),
-                              decoration: const InputDecoration(labelText: 'TITLE (optional)', border: OutlineInputBorder()),
-                              onChanged: (v) {
-                                ble.desired.value = desired.copyWith(title: v);
-                                _debounced(const Duration(milliseconds: 300), () {
-                                  if (ble.status.value == ConnStatus.connected) ble.sendPatch({'title': v});
-                                });
-                              },
-                            ),
-                          ],
-                        ),
-                      ),
-
                       const SizedBox(height: 12),
 
                       CutPanel(
