@@ -1,11 +1,17 @@
+# firmware/tools/test_visuals_with_ui.py
+# Run:
+#   python3 -u -m firmware.tools.test_visuals_with_ui
+#
+# Integrates LCDUI component + your ESP32 serial driver + mic features.
+# Bluetooth mode is UI-only here: it queries system bluetooth status and shows it.
+# (Audio source switching is handled in your main runner later.)
+
 import time
+import subprocess
 import numpy as np
-import sounddevice as sd
 
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 from firmware.audio.features import FeatureExtractor
-
-from firmware.ui.lcd_ui import LCDUI
 
 from firmware.effects.bars import BarsEffect
 from firmware.effects.oscilloscope import OscilloscopeEffect
@@ -14,108 +20,174 @@ from firmware.effects.spectral_fire import SpectralFireEffect
 from firmware.effects.vu_meter import VUMeterEffect
 from firmware.effects.wave import WaveEffect
 
+from firmware.ui.lcd_ui import LCDUI, UIState, BTStatus
 
 W, H = 16, 16
 NUM_LEDS = W * H
-
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
 FPS = 40.0
 DT_TARGET = 1.0 / FPS
 
-SWITCH_EVERY_S = 5.0  # auto-switch
+EFFECTS = [
+    ("bars", BarsEffect(w=W, h=H)),
+    ("oscilloscope", OscilloscopeEffect(w=W, h=H)),
+    ("radial_pulse", RadialPulseEffect(w=W, h=H)),
+    ("spectral_fire", SpectralFireEffect(w=W, h=H)),
+    ("vu_meter", VUMeterEffect(w=W, h=H)),
+    ("wave", WaveEffect(w=W, h=H)),
+]
+COLOR_MODES = ["auto", "rainbow", "mono"]
 
 
-def push_frame(driver: Esp32SerialDriver, frame):
-    # Driver ma buf + set_pixel + show() bez argumentów
-    for i, rgb in enumerate(frame):
-        driver.set_pixel(i, rgb)
-    driver.show()
+def bt_snapshot() -> BTStatus:
+    """
+    Minimal non-invasive BT status from bluetoothctl.
+    Works if bluetoothctl exists and controller is up.
+    """
+    st = BTStatus()
+    try:
+        out = subprocess.check_output(["bluetoothctl", "show"], text=True, timeout=0.4)
+        st.enabled = ("Powered: yes" in out)
+        st.advertising = ("Discoverable: yes" in out) or ("Pairable: yes" in out)
+    except Exception:
+        return st
 
+    # best-effort: connected device name/address
+    try:
+        info = subprocess.check_output(["bluetoothctl", "info"], text=True, timeout=0.4)
+        # bluetoothctl info without addr often prints "Missing device address" => ignore
+        if "Device" in info and "Connected: yes" in info:
+            st.connected = True
+    except Exception:
+        pass
 
-def make_effects(w=W, h=H):
-    return [
-        ("bars", BarsEffect(w=w, h=h)),
-        ("oscilloscope", OscilloscopeEffect(w=w, h=h)),
-        ("radial_pulse", RadialPulseEffect(w=w, h=h)),
-        ("spectral_fire", SpectralFireEffect(w=w, h=h)),
-        ("vu_meter", VUMeterEffect(w=w, h=h)),
-        ("wave", WaveEffect(w=w, h=h)),
-    ]
+    return st
 
 
 def main():
-    # ESP32 driver: UWAGA na kolejność argumentów w Twojej klasie
-    leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=PORT, baud=BAUD, debug=False)
-
-    # LCD UI (poziomo, czarne tło, neon)
     ui = LCDUI({
+        "backend": "luma",
+        "driver": "st7789",
+        "spi_port": 0,
+        "spi_device": 0,
+        "gpio_dc": 24,
+        "gpio_rst": 25,
+        "gpio_cs": None,
+        "rotate": 0,
         "width": 240,
-        "height": 320,
-        "spi_bus": 0,
-        "spi_dev": 0,
-        "spi_hz": 40_000_000,
-        "dc": 25,
-        "rst": 24,
-        "rotate": 90,
-        "invert": True,
-        "madctl_base": 0x00,
-        "ui_fps": 10.0,   # UI max 10 FPS -> nie laguje audio/LED
+        "height": 240,
+        "spi_hz": 32000000,
+        "gpio_buttons": False,
     })
 
+    leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=PORT, baud=BAUD, debug=False)
     fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000)
 
+    import sounddevice as sd
     block = fe.nfft
     stream = sd.InputStream(samplerate=fe.sr, channels=1, blocksize=block, dtype="float32")
     stream.start()
 
-    effects = make_effects()
-    params = {"intensity": 0.75, "color_mode": "auto", "power": 0.75, "glow": 0.25}
+    effect_names = [n for n, _ in EFFECTS]
+    cur_idx = 0
+    cur_name, cur_eff = EFFECTS[cur_idx]
+    ui.set_effects(effect_names, cur_name)
 
-    idx = 0
-    name, eff = effects[idx]
-    t_switch = time.monotonic() + SWITCH_EVERY_S
+    params = {"intensity": 0.75, "color_mode": "auto"}
+    state = UIState(mode="MIC", effect_name=cur_name, intensity=params["intensity"], color_mode=params["color_mode"])
 
-    last = time.monotonic()
-    print(f"[run] start -> {name}")
+    t_prev = time.monotonic()
+    fps_ema = 0.0
+    fps_a = 0.90
+    t_bt = 0.0
 
-    while True:
-        now = time.monotonic()
-        dt = now - last
-        last = now
+    try:
+        while True:
+            now = time.monotonic()
+            dt = now - t_prev
+            t_prev = now
+            if dt <= 0:
+                dt = DT_TARGET
 
-        # auto switch
-        if SWITCH_EVERY_S > 0 and now >= t_switch:
-            idx = (idx + 1) % len(effects)
-            name, eff = effects[idx]
-            t_switch = now + SWITCH_EVERY_S
-            print(f"[run] -> {name}")
+            # UI inputs
+            actions = ui.poll_inputs()
+            if actions.get("quit"):
+                break
 
-        x, _ = stream.read(block)
-        x = x[:, 0].astype(np.float32)
-        features = fe.compute(x)
+            if actions.get("toggle_mode"):
+                state.mode = "BT" if state.mode == "MIC" else "MIC"
 
-        # frame
+            if "effect" in actions:
+                cur_name = actions["effect"]
+                cur_idx = effect_names.index(cur_name)
+                cur_eff = EFFECTS[cur_idx][1]
+
+            if "intensity_step" in actions:
+                params["intensity"] = float(np.clip(params["intensity"] + actions["intensity_step"], 0.05, 1.0))
+
+            if actions.get("cycle_color"):
+                i = COLOR_MODES.index(params["color_mode"])
+                params["color_mode"] = COLOR_MODES[(i + 1) % len(COLOR_MODES)]
+
+            # features (MIC always computed; BT mode may still show visuals from MIC unless you switch audio source)
+            x, _ = stream.read(block)
+            x = x[:, 0].astype(np.float32)
+            features = fe.compute(x)
+
+            # visuals
+            try:
+                frame = cur_eff.update(features, dt, params)
+            except TypeError:
+                frame = cur_eff.update(features, dt)
+
+            for i, rgb in enumerate(frame):
+                leds.set_pixel(i, rgb)
+            leds.show()
+
+            # state update
+            fps = 1.0 / dt
+            fps_ema = fps_a * fps_ema + (1.0 - fps_a) * fps
+
+            state.effect_name = cur_name
+            state.intensity = params["intensity"]
+            state.color_mode = params["color_mode"]
+            state.fps = fps_ema
+            state.serial_ok = True
+            state.last_err = ""
+
+            # MIC metrics
+            state.rms = float(features.get("rms", 0.0))
+            state.bass = float(features.get("bass", 0.0))
+            state.mid = float(features.get("mid", 0.0))
+            state.treble = float(features.get("treble", 0.0))
+            b = features.get("bands", None)
+            state.bands = list(b) if b is not None else None
+
+            # BT snapshot (rate-limited)
+            if state.mode == "BT" and (now - t_bt) > 0.5:
+                state.bt = bt_snapshot()
+                t_bt = now
+
+            ui.render(state)
+
+            sleep = DT_TARGET - (time.monotonic() - now)
+            if sleep > 0:
+                time.sleep(sleep)
+
+    finally:
         try:
-            frame = eff.update(features, dt, params)
-        except TypeError:
-            frame = eff.update(features, dt)
-
-        if len(frame) != NUM_LEDS:
-            frame = list(frame)
-            if len(frame) != NUM_LEDS:
-                raise RuntimeError(f"{name}: frame len {len(frame)} != {NUM_LEDS}")
-
-        push_frame(leds, frame)
-
-        # UI update (rzadziej)
-        ui.set_status(effect=name, rms=features.get("rms", 0.0), energy=float(np.mean(features.get("bands", 0.0))))
-        ui.tick()
-
-        sleep = DT_TARGET - (time.monotonic() - now)
-        if sleep > 0:
-            time.sleep(sleep)
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+        try:
+            leds.clear()
+            leds.close()
+        except Exception:
+            pass
+        ui.close()
 
 
 if __name__ == "__main__":
