@@ -1,16 +1,15 @@
-# firmware/test_visualizations.py
+# firmware/tools/test_visualizations.py
 # Uruchom:
-#   python3 -u -m firmware.test_visualizations
+#   python3 -u -m firmware.tools.test_visualizations
 #
 # Co 5 sekund przełącza efekt i wysyła klatki na ESP32.
 
 import time
-import numpy as np
+import inspect
 
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 from firmware.audio.features import FeatureExtractor
 
-# efekty
 from firmware.effects.bars import BarsEffect
 from firmware.effects.oscilloscope import OscilloscopeEffect
 from firmware.effects.radial_pulse import RadialPulseEffect
@@ -25,8 +24,37 @@ PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
 SWITCH_EVERY_S = 5.0
-FPS = 40.0  # 25-60 ok
-DT = 1.0 / FPS
+FPS = 40.0
+DT_TARGET = 1.0 / FPS
+
+
+def make_driver(DriverCls, *, port, baud, num_leds, w=None, h=None):
+    """
+    Buduje Esp32SerialDriver używając WYŁĄCZNIE poprawnych nazw z sygnatury __init__.
+    Dzięki temu nie ma "multiple values for argument".
+    """
+    sig = inspect.signature(DriverCls.__init__)
+    params = list(sig.parameters.keys())
+    if params and params[0] == "self":
+        params = params[1:]
+
+    name_map = {
+        "port": port, "device": port, "tty": port,
+        "baud": baud, "baudrate": baud, "rate": baud,
+        "num_leds": num_leds, "n_leds": num_leds, "leds": num_leds, "count": num_leds,
+        "w": w, "width": w,
+        "h": h, "height": h,
+    }
+
+    kwargs = {}
+    for p in params:
+        if p in name_map and name_map[p] is not None:
+            kwargs[p] = name_map[p]
+
+    if not kwargs:
+        raise TypeError(f"Nie potrafię dopasować argumentów. Sygnatura: {sig}")
+
+    return DriverCls(**kwargs)
 
 
 def make_effects(w=W, h=H):
@@ -41,18 +69,16 @@ def make_effects(w=W, h=H):
 
 
 def main():
-    # jeśli Twój driver ma inną sygnaturę, to ustaw TYLKO positional albo TYLKO keyword.
-    # Najbezpieczniej: port, baud, num_leds jako keyword:
-    leds = Esp32SerialDriver(PORT, BAUD, num_leds=NUM_LEDS)
+    leds = make_driver(Esp32SerialDriver, port=PORT, baud=BAUD, num_leds=NUM_LEDS, w=W, h=H)
 
-    fe = FeatureExtractor()  # zakładam że zwraca dict: rms, bands, samplerate, nfft, mag (opcjonalnie)
+    fe = FeatureExtractor()
     effects = make_effects()
 
     params = {
         "intensity": 0.75,
         "color_mode": "auto",
-        "power": 0.85,   # używane przez wave/palette, reszta może ignorować
-        "glow": 0.30,    # wave
+        "power": 0.85,
+        "glow": 0.30,
     }
 
     idx = 0
@@ -67,7 +93,6 @@ def main():
         dt = now - t_prev
         t_prev = now
 
-        # przełączanie efektu
         if now >= t_switch:
             idx = (idx + 1) % len(effects)
             cur_name, cur = effects[idx]
@@ -75,27 +100,26 @@ def main():
             print(f"[tester] -> {cur_name}")
 
         # audio -> features
-        features = fe.update(dt) if hasattr(fe, "update") else fe.get_features(dt)
+        if hasattr(fe, "update"):
+            features = fe.update(dt)
+        else:
+            features = fe.get_features(dt)
 
         # efekt -> frame
         try:
-            frame = cur.update(features, dt, params)  # większość Twoich efektów ma (features, dt, params)
+            frame = cur.update(features, dt, params)
         except TypeError:
-            # fallback dla efektów bez params
             frame = cur.update(features, dt)
 
-        # sanity: długość klatki
         if len(frame) != NUM_LEDS:
-            # próbuj spłaszczyć jeśli ktoś zwróci np. ndarray
             frame = list(frame)
             if len(frame) != NUM_LEDS:
                 raise RuntimeError(f"{cur_name}: frame len {len(frame)} != {NUM_LEDS}")
 
-        # wysyłka do ESP
         leds.show(frame)
 
-        # stały fps
-        sleep = DT - (time.monotonic() - now)
+        # stałe FPS
+        sleep = DT_TARGET - (time.monotonic() - now)
         if sleep > 0:
             time.sleep(sleep)
 
