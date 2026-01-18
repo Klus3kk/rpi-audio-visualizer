@@ -99,6 +99,9 @@ class Application(dbus.service.Object):
         self.services = []
         super().__init__(bus, self.path)
 
+    def get_path(self):
+        return dbus.ObjectPath(self.path)
+
     def add_service(self, service):
         self.services.append(service)
 
@@ -110,6 +113,7 @@ class Application(dbus.service.Object):
             for chrc in service.characteristics:
                 response[chrc.get_path()] = chrc.get_properties()
         return response
+
 
 
 class Service(dbus.service.Object):
