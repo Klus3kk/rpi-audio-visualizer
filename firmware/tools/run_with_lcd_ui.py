@@ -23,8 +23,8 @@ NUM_LEDS = W * H
 PORT = "/dev/ttyUSB0"
 BAUD = 115200
 
-FPS_LED = 40.0
-FPS_LCD = 15.0
+FPS_LED = 20.0
+FPS_LCD = 30.0
 
 
 def make_effects(w=W, h=H):
