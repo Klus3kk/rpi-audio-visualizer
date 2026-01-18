@@ -52,9 +52,11 @@ def main():
 
     effects = make_effects()
     params = {
-        "intensity": 0.85,     # trochę mocniej na start
+        "intensity": 0.85,
         "color_mode": "auto",
-        "power": 0.55,         # globalnie mniej jasno
+        "power": 0.55,
+        "glow": 0.22,
+        "mic_gain": 2.2,   # podbijaj do 3.0 jeśli nadal za cicho
     }
 
     i = 0
