@@ -62,7 +62,7 @@ class FeatureExtractor:
         if rms < RMS_GATE:
             bands_norm[:] = 0.0
 
-        bass = float(np.mean(bands_norm[: max(1, self.bands // 6)]))
+        bass = float(np.mean(bands_norm[: max(1, self.bands // 10)]))
         mid = float(np.mean(bands_norm[self.bands // 6 : 4 * self.bands // 6]))
         treble = float(np.mean(bands_norm[4 * self.bands // 6 :]))
 
