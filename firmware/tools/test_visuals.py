@@ -1,6 +1,5 @@
 # firmware/tools/test_visuals.py
-# Uruchom:
-#   python3 -u -m firmware.tools.test_visuals
+# python3 -u -m firmware.tools.test_visuals
 
 import time
 import inspect
@@ -29,9 +28,7 @@ DT_TARGET = 1.0 / FPS
 
 def make_driver(DriverCls, *, port, baud, num_leds, w=None, h=None):
     sig = inspect.signature(DriverCls.__init__)
-    params = list(sig.parameters.keys())
-    if params and params[0] == "self":
-        params = params[1:]
+    params = [p for p in sig.parameters.keys() if p != "self"]
 
     name_map = {
         "port": port, "device": port, "tty": port,
@@ -41,15 +38,72 @@ def make_driver(DriverCls, *, port, baud, num_leds, w=None, h=None):
         "h": h, "height": h,
     }
 
-    kwargs = {}
-    for p in params:
-        if p in name_map and name_map[p] is not None:
-            kwargs[p] = name_map[p]
-
+    kwargs = {p: name_map[p] for p in params if p in name_map and name_map[p] is not None}
     if not kwargs:
         raise TypeError(f"Nie potrafię dopasować argumentów. Sygnatura: {sig}")
 
     return DriverCls(**kwargs)
+
+
+def push_frame(leds, frame):
+    """
+    Obsługuje różne API drivera:
+    - jeśli show(frame) istnieje -> użyj
+    - jeśli show() bez argów, szukaj metody która przyjmuje frame: set_frame / write / send / update / render / draw
+    - fallback: jeśli ma atrybut buffer/pixels/frame, ustaw i wywołaj show()
+    """
+    # 1) show(frame) jeśli działa
+    if hasattr(leds, "show"):
+        try:
+            sig = inspect.signature(leds.show)
+            # signature for bound method: (frame) => 1 parameter
+            if len(sig.parameters) == 1:
+                leds.show(frame)
+                return
+        except Exception:
+            pass
+
+    # 2) szukaj metody przyjmującej frame
+    candidates = ["set_frame", "write", "send", "update", "render", "draw", "set_pixels", "set"]
+    for name in candidates:
+        if hasattr(leds, name):
+            fn = getattr(leds, name)
+            if callable(fn):
+                try:
+                    sig = inspect.signature(fn)
+                    if len(sig.parameters) == 1:  # bound => (frame)
+                        fn(frame)
+                        if hasattr(leds, "show") and callable(getattr(leds, "show")):
+                            leds.show()
+                        return
+                except Exception:
+                    # spróbuj wywołać bez inspekcji
+                    try:
+                        fn(frame)
+                        if hasattr(leds, "show") and callable(getattr(leds, "show")):
+                            leds.show()
+                        return
+                    except Exception:
+                        pass
+
+    # 3) atrybut bufora + show()
+    for attr in ["frame", "buffer", "pixels", "leds"]:
+        if hasattr(leds, attr):
+            try:
+                setattr(leds, attr, frame)
+                if hasattr(leds, "show") and callable(getattr(leds, "show")):
+                    leds.show()
+                    return
+            except Exception:
+                pass
+
+    # 4) nie znaleziono – pokaż metody żebyś mi wkleił 1 linijkę
+    names = [n for n in dir(leds) if not n.startswith("_")]
+    raise RuntimeError(
+        "Nie mogę wysłać frame do Esp32SerialDriver.\n"
+        "Twoje show() jest bez argumentów, ale nie widzę metody typu set_frame/write/send.\n"
+        f"Dostępne publiczne nazwy: {names}"
+    )
 
 
 def make_effects(w=W, h=H):
@@ -64,32 +118,23 @@ def make_effects(w=W, h=H):
 
 
 def main():
-    # --- LED driver (bez konfliktów argumentów)
     leds = make_driver(Esp32SerialDriver, port=PORT, baud=BAUD, num_leds=NUM_LEDS, w=W, h=H)
 
-    # --- FeatureExtractor: on potrzebuje surowych próbek audio x
     fe = FeatureExtractor(samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000)
 
-    # --- Audio input (sounddevice)
     import sounddevice as sd
-
-    block = fe.nfft  # dokładnie tyle próbek ile FFT
-    stream = sd.InputStream(
-        samplerate=fe.sr,
-        channels=1,
-        blocksize=block,
-        dtype="float32",
-    )
+    block = fe.nfft
+    stream = sd.InputStream(samplerate=fe.sr, channels=1, blocksize=block, dtype="float32")
     stream.start()
 
     effects = make_effects()
     params = {"intensity": 0.75, "color_mode": "auto"}
 
-    idx = 0
-    cur_name, cur = effects[idx]
+    i = 0
+    name, eff = effects[i]
     t_switch = time.monotonic() + SWITCH_EVERY_S
 
-    print(f"[tester] start -> {cur_name}")
+    print(f"[tester] start -> {name}")
 
     last = time.monotonic()
     while True:
@@ -98,30 +143,27 @@ def main():
         last = now
 
         if now >= t_switch:
-            idx = (idx + 1) % len(effects)
-            cur_name, cur = effects[idx]
+            i = (i + 1) % len(effects)
+            name, eff = effects[i]
             t_switch = now + SWITCH_EVERY_S
-            print(f"[tester] -> {cur_name}")
+            print(f"[tester] -> {name}")
 
-        # czytaj audio -> x
-        x, _ = stream.read(block)          # (block, 1)
-        x = x[:, 0].astype(np.float32)     # (block,)
+        x, _ = stream.read(block)
+        x = x[:, 0].astype(np.float32)
 
-        # features z Twojego FE
         features = fe.compute(x)
 
-        # efekt -> frame
         try:
-            frame = cur.update(features, dt, params)
+            frame = eff.update(features, dt, params)
         except TypeError:
-            frame = cur.update(features, dt)
+            frame = eff.update(features, dt)
 
         if len(frame) != NUM_LEDS:
             frame = list(frame)
             if len(frame) != NUM_LEDS:
-                raise RuntimeError(f"{cur_name}: frame len {len(frame)} != {NUM_LEDS}")
+                raise RuntimeError(f"{name}: frame len {len(frame)} != {NUM_LEDS}")
 
-        leds.show(frame)
+        push_frame(leds, frame)
 
         sleep = DT_TARGET - (time.monotonic() - now)
         if sleep > 0:
