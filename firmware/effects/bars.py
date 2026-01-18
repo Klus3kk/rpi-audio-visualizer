@@ -1,234 +1,68 @@
 import numpy as np
 import colorsys
-
-def serpentine_index(x, y, w=16, h=16, origin_bottom=False):
-    if origin_bottom:
-        y = (h - 1) - y
-    if (y & 1) == 0:
-        return y * w + x
-    return y * w + (w - 1 - x)
-
-idx_serp = serpentine_index
-
+from firmware.effects.common import safe_bands, safe_rms, blank_frame
 
 class BarsEffect:
-    """
-    Filozofia:
-    - X: 16 pasm (0..20kHz), lewo->prawo: niskie->wysokie, po 1250 Hz na kolumnę
-    - Y: wysokość słupka (0..h-1), start od samego dołu (y=0)
-    - Jasność stała (V w HSV) -> audio nie zwiększa jasności, tylko wysokość
-    - Cisza: target=0, ale słupki opadają (decay), nie znikają natychmiast
-    - Frame zwracany jako row-major:
-        idx = y*w + x, gdzie y=0 to dolny rząd w logice efektu.
-      Mapowanie serpentine + flip robi ESP32.
-    """
-
-    def __init__(
-        self,
-        w=16,
-        h=16,
-        # dynamika:
-        attack=0.60,              # 0..1
-        decay_px_per_s=6.0,       # wolniejsze opadanie = mniejsza liczba
-        peak_decay_px_per_s=3.0,
-
-        # cisza / stabilność:
-        rms_gate=0.003,           # typowo dla USB mic (0.002..0.006)
-        gate=0.02,                # gate po normalizacji pasm (0.01..0.05)
-
-        # stała jasność:
-        hsv_v=0.22,               # stała jasność (0.15..0.35)
-        hsv_s=1.0,
-
-        # pasma:
-        band_hz=1250.0,
-        fmax=20000.0,
-
-        # stała skala dB:
-        NOISE_FLOOR_DB=-85.0,
-        RANGE_DB=60.0,
-
-        # gradient po Y:
-        y_hue_shift=0.10,         # ile przesunąć hue od dołu do góry (0..~0.25)
-        y_v_boost=0.12,           # ile podbić V ku górze (bez audio, nadal stała per Y)
-    ):
+    def __init__(self, w=16, h=16):
         self.w = int(w)
         self.h = int(h)
 
-        self.level = np.zeros(self.w, dtype=np.float32)
-        self.peak  = np.zeros(self.w, dtype=np.float32)
+        self.level = np.zeros(self.w, np.float32)
+        self.peak  = np.zeros(self.w, np.float32)
+        self.prev  = np.zeros(self.w, np.float32)
 
-        self.attack = float(attack)
-        self.decay = float(decay_px_per_s)
-        self.peak_decay = float(peak_decay_px_per_s)
+        self.attack = 0.6
+        self.decay = 6.0
+        self.peak_decay = 3.0
 
-        self.rms_gate = float(rms_gate)
-        self.gate = float(gate)
+        self.hsv_s = 1.0
+        self.hsv_v = 0.22
 
-        self.hsv_v = float(hsv_v)
-        self.hsv_s = float(hsv_s)
-
-        self.band_hz = float(band_hz)
-        self.fmax = float(fmax)
-
-        self.NOISE_FLOOR_DB = float(NOISE_FLOOR_DB)
-        self.RANGE_DB = float(RANGE_DB)
-
-        self.y_hue_shift = float(y_hue_shift)
-        self.y_v_boost = float(y_v_boost)
-
-        # do wygładzania pasm
-        self._prev_vals = np.zeros(self.w, dtype=np.float32)
-
-        # precompute bazowego hue po X (częstotliwość)
-        self._base_hue = np.array(
-            [x / max(1, self.w - 1) for x in range(self.w)],
-            dtype=np.float32
-        )
-
-        # precompute gradient (hue_shift i v_boost) po Y
-        # y=0 dół -> najmniejsze, y=h-1 góra -> największe
-        if self.h > 1:
-            t = np.linspace(0.0, 1.0, self.h, dtype=np.float32)
-        else:
-            t = np.array([0.0], dtype=np.float32)
-        self._y_hue = (t * self.y_hue_shift).astype(np.float32)
-        self._y_v = (self.hsv_v + t * self.y_v_boost).astype(np.float32)
-        self._y_v = np.clip(self._y_v, 0.0, 1.0)
-
-    def _bands_1250hz_from_mag2(self, mag2, sr, nfft):
-        import numpy as np
-
-        # ---- normalize mag2 to 1D numpy array ----
-        if mag2 is None:
-            return np.zeros(self.w, dtype=np.float32)
-
-        mag2 = np.asarray(mag2)
-
-        if mag2.ndim == 0:
-            return np.zeros(self.w, dtype=np.float32)
-
-        if mag2.ndim > 1:
-            mag2 = mag2.reshape(-1)
-
-        n = int(mag2.shape[0])
-        if n <= 2:
-            return np.zeros(self.w, dtype=np.float32)
-
-        # SAFE fallback: map spectrum bins -> self.w bands linearly
-        vals = np.zeros(self.w, dtype=np.float32)
-        edges = np.linspace(0, n - 1, self.w + 1).astype(int)
-
-        for i in range(self.w):
-            lo = int(edges[i])
-            hi = int(edges[i + 1])
-            if hi <= lo:
-                hi = min(lo + 1, n - 1)
-            lo = max(lo, 0)
-            hi = min(hi, n - 1)
-
-            seg = mag2[lo:hi + 1]
-            vals[i] = float(np.mean(seg)) if seg.size else 0.0
-
-        # normalize to 0..1 in a stable way (optional but helps)
-        # If mag2 is already normalized, this won't hurt much.
-        mx = float(np.max(vals)) if vals.size else 0.0
-        if mx > 1e-12:
-            vals = vals / mx
-
-        return np.clip(vals, 0.0, 1.0)
-
-
+        self.base_hue = np.linspace(0.0, 1.0, self.w, dtype=np.float32)
 
     def update(self, features, dt, params=None):
-        if params is None:
-            params = {}
+        try:
+            dt = float(dt) if dt else 0.02
+            intensity = float((params or {}).get("intensity", 0.75))
 
-        intensity = float(params.get("intensity", 1.0))
+            bands = safe_bands(features, self.w)
+            rms = safe_rms(features)
 
-        sr = int(features.get("samplerate", features.get("sr", 44100)))
-        nfft = int(features.get("nfft", 1024))
-        rms = float(features.get("rms", 0.0))
-        dt = float(dt) if dt else 0.02
+            if rms < 0.003:
+                bands[:] = 0.0
 
-        silent = (rms < self.rms_gate)
+            alpha = 0.30
+            bands = (1.0 - alpha) * self.prev + alpha * bands
+            self.prev = bands
 
-        # --- prefer mag2, fallback mag->mag^2 ---
-        mag2 = features.get("mag2", None)
-        if mag2 is None:
-            mag = features.get("mag", None)
-            if mag is not None:
-                mag = np.asarray(mag, dtype=np.float32)
-                mag2 = mag * mag  # convert amplitude->power
+            bands[bands < 0.02] = 0.0
+            bands = np.clip(bands * (0.6 + 1.4 * intensity), 0.0, 1.0)
 
-        if mag2 is not None:
-            mag2 = np.asarray(mag2, dtype=np.float32)
-            vals = self._bands_1250hz_from_mag2(mag2, sr, nfft)
-        else:
-            bands = features.get("bands", None)
-            if bands is None:
-                return [(0, 0, 0)] * (self.w * self.h)
+            target = bands * (self.h - 1)
 
-            bands = np.asarray(bands, dtype=np.float32).reshape(-1)
+            fall = self.decay * dt
+            pfall = self.peak_decay * dt
 
-            # map bands -> self.w
-            if bands.shape[0] != self.w:
-                xi = np.linspace(0, max(0, bands.shape[0] - 1), self.w)
-                vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
-            else:
-                vals = bands.astype(np.float32)
+            for x in range(self.w):
+                if target[x] > self.level[x]:
+                    self.level[x] = (1 - self.attack) * self.level[x] + self.attack * target[x]
+                else:
+                    self.level[x] = max(0.0, self.level[x] - fall)
 
-            vals = np.clip(vals, 0.0, 1.0)
+                if self.level[x] > self.peak[x]:
+                    self.peak[x] = self.level[x]
+                else:
+                    self.peak[x] = max(0.0, self.peak[x] - pfall)
 
+            frame = blank_frame(self.w, self.h)
 
-        # jeśli cisza: target=0, ale opadanie zostaje
-        if silent:
-            vals[:] = 0.0
-            self._prev_vals *= 0.0
+            for x in range(self.w):
+                hh = int(self.level[x])
+                for y in range(hh + 1):
+                    hcol = self.base_hue[x]
+                    r,g,b = colorsys.hsv_to_rgb(hcol, self.hsv_s, self.hsv_v)
+                    frame[y * self.w + x] = (int(r*255), int(g*255), int(b*255))
 
-        # wygładzanie pasm
-        alpha = 0.30
-        vals = (1.0 - alpha) * self._prev_vals + alpha * vals
-        self._prev_vals = vals
-
-        # gate
-        vals = vals.copy()
-        vals[vals < self.gate] = 0.0
-
-        # intensity tylko wysokość
-        vals = np.clip(vals * (0.55 + 1.45 * intensity), 0.0, 1.0)
-        target = vals * (self.h - 1)
-
-        fall = self.decay * dt
-        peak_fall = self.peak_decay * dt
-        a = self.attack
-
-        for x in range(self.w):
-            if target[x] > self.level[x]:
-                self.level[x] = (1.0 - a) * self.level[x] + a * target[x]
-            else:
-                self.level[x] = max(0.0, self.level[x] - fall)
-
-            if self.level[x] > self.peak[x]:
-                self.peak[x] = self.level[x]
-            else:
-                self.peak[x] = max(0.0, self.peak[x] - peak_fall)
-
-        # frame: row-major, y=0 dół
-        frame = [(0, 0, 0)] * (self.w * self.h)
-
-        for x in range(self.w):
-            hh = int(np.clip(np.round(self.level[x]), 0, self.h - 1))
-
-            # pełne podświetlenie od dołu, START OD y=0
-            for y in range(hh + 1):
-                # kolor zależny od X (freq) i Y (wysokość)
-                hcol = float(self._base_hue[x] + self._y_hue[y]) % 1.0
-                vcol = float(self._y_v[y])
-                r, g, b = colorsys.hsv_to_rgb(hcol, self.hsv_s, vcol)
-                idx = idx_serp(x, y, w=self.w, h=self.h, origin_bottom=False)
-                frame[idx] = (int(r * 255), int(g * 255), int(b * 255))
-
-        
-        
-        return frame
+            return frame
+        except Exception:
+            return blank_frame(self.w, self.h)
