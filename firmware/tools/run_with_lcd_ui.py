@@ -8,7 +8,7 @@ def main():
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
         spi_bus=0, spi_dev=0, spi_hz=24_000_000,
-        rotate=90,          # 90 albo 270
+        rotate=270,          # 90 albo 270
         mirror=True,        # <-- TU masz "invert na druga stronę"
         panel_invert=False, # <-- jeśli tło było białe, to to ma być False
         dim=0.85,
