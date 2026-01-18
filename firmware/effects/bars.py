@@ -22,8 +22,9 @@ class BarsEffect:
         attack=0.55,              # 0..1, większe = szybciej rośnie do targetu
         decay_px_per_s=9.0,       # px/s opadania
         peak_decay_px_per_s=5.0,
-        # gate ciszy:
-        gate=0.06,                # 0.02..0.12 (zależy od mikrofonu)
+        # cisza:
+        rms_gate=0.012,           # twardy gate po RMS: cisza -> natychmiast czarno
+        gate=0.06,                # gate na wartościach pasm (po normalizacji)
         # jasność stała:
         hsv_v=0.22,               # 0..1 (realnie 0.15..0.35)
         hsv_s=1.0,
@@ -31,6 +32,10 @@ class BarsEffect:
         band_hz=1250.0,           # 20k/16 = 1250 Hz
         fmax=20000.0,
         floor_px=0.0,
+
+        # stała skala pasm (żeby nie skakało między klatkami):
+        NOISE_FLOOR_DB=-78.0,     # poniżej = cisza
+        RANGE_DB=48.0,            # zakres mapowany do 0..1
     ):
         self.w = int(w)
         self.h = int(h)
@@ -42,13 +47,18 @@ class BarsEffect:
         self.decay = float(decay_px_per_s)
         self.peak_decay = float(peak_decay_px_per_s)
 
+        self.rms_gate = float(rms_gate)
         self.gate = float(gate)
+
         self.hsv_v = float(hsv_v)
         self.hsv_s = float(hsv_s)
 
         self.band_hz = float(band_hz)
         self.fmax = float(fmax)
         self.floor_px = float(floor_px)
+
+        self.NOISE_FLOOR_DB = float(NOISE_FLOOR_DB)
+        self.RANGE_DB = float(RANGE_DB)
 
         # precompute stałych kolorów (żeby nie liczyć HSV w każdej klatce)
         self._colors = []
@@ -57,22 +67,23 @@ class BarsEffect:
             r, g, b = colorsys.hsv_to_rgb(hue, self.hsv_s, self.hsv_v)
             self._colors.append((int(r * 255), int(g * 255), int(b * 255)))
 
-    def _bands_1250hz(self, mag: np.ndarray, sr: int, nfft: int) -> np.ndarray:
+        # do wygładzania PASM (osobno od smoothing w FeatureExtractor)
+        self._prev_vals = np.zeros(self.w, dtype=np.float32)
+
+    def _bands_1250hz_from_mag2(self, mag2: np.ndarray, sr: int, nfft: int) -> np.ndarray:
         """
-        mag: |rfft|, length nfft//2 + 1, mag[0]=DC
-        Zwraca 16 wartości 0..1, każda to energia w pasmie 1250 Hz.
+        mag2: power spectrum z rfft (real^2+imag^2), length nfft//2 + 1, mag2[0]=DC
+        Zwraca 16 wartości 0..1, każda to energia w pasmie 1250 Hz, w stałej skali dB.
         """
         nyq = sr * 0.5
         fmax = min(self.fmax, nyq)
         if fmax <= 0:
             return np.zeros(self.w, dtype=np.float32)
 
-        # pasma: [0..1250), [1250..2500), ..., [18750..20000)
-        out = np.zeros(self.w, dtype=np.float32)
-
-        # freqs per bin
         hz_per_bin = sr / float(nfft)
 
+        # energia w paśmie (mean power)
+        band_pow = np.zeros(self.w, dtype=np.float32)
         for i in range(self.w):
             lo_hz = i * self.band_hz
             hi_hz = min((i + 1) * self.band_hz, fmax)
@@ -80,24 +91,22 @@ class BarsEffect:
             lo = int(np.floor(lo_hz / hz_per_bin))
             hi = int(np.floor(hi_hz / hz_per_bin))
 
-            lo = max(1, lo)                  # pomijamy DC
-            hi = min(hi, mag.shape[0] - 1)
+            lo = max(1, lo)  # pomijamy DC
+            hi = min(hi, mag2.shape[0] - 1)
 
             if hi <= lo:
-                out[i] = 0.0
+                band_pow[i] = 0.0
             else:
-                out[i] = float(np.mean(mag[lo:hi]))
+                band_pow[i] = float(np.mean(mag2[lo:hi]))
 
-        # kompresja dynamiczna i normalizacja klatkowa (stabilniejsza niż goły mean)
-        out = np.log1p(out).astype(np.float32)
+        # dB (stała skala)
+        band_db = 10.0 * np.log10(band_pow + 1e-12).astype(np.float32)
 
-        m = float(np.max(out))
-        if m > 1e-9:
-            out = out / m
-        else:
-            out[:] = 0.0
+        # map do 0..1
+        vals = (band_db - self.NOISE_FLOOR_DB) / self.RANGE_DB
+        vals = np.clip(vals, 0.0, 1.0)
 
-        return out
+        return vals
 
     def update(self, features, dt, params=None):
         if params is None:
@@ -106,14 +115,22 @@ class BarsEffect:
         intensity = float(params.get("intensity", 1.0))  # wpływa tylko na wysokość
         sr = int(features.get("samplerate", 44100))
         nfft = int(features.get("nfft", 1024))
+        rms = float(features.get("rms", 0.0))
 
-        # potrzebujemy FFT albo chociaż mag. Jeśli masz tylko bands w features -> użyj tego fallbackowo.
-        mag = features.get("mag", None)  # jeśli dodasz w FeatureExtractor
-        if mag is not None:
-            mag = np.asarray(mag, dtype=np.float32)
-            vals = self._bands_1250hz(mag, sr, nfft)
+        # cisza -> natychmiast czarno, bez wygaszania “ogonem”
+        if rms < self.rms_gate:
+            self.level *= 0.0
+            self.peak  *= 0.0
+            self._prev_vals *= 0.0
+            return [(0, 0, 0)] * (self.w * self.h)
+
+        # preferuj mag2 (power) z FeatureExtractor
+        mag2 = features.get("mag", None)
+        if mag2 is not None:
+            mag2 = np.asarray(mag2, dtype=np.float32)
+            vals = self._bands_1250hz_from_mag2(mag2, sr, nfft)
         else:
-            # fallback: jak masz features["bands"] (np. geomspace), to tylko resampluj
+            # fallback: użyj bands (jeśli nie ma FFT)
             bands = features.get("bands", None)
             if bands is None:
                 return [(0, 0, 0)] * (self.w * self.h)
@@ -123,10 +140,16 @@ class BarsEffect:
                 vals = np.interp(xi, np.arange(bands.shape[0]), bands).astype(np.float32)
             else:
                 vals = bands
-
             vals = np.clip(vals, 0.0, 1.0)
 
-        # gate ciszy (najważniejsze dla “nie rusza się po wyciszeniu”)
+        # dodatkowe wygładzanie samych pasm (żeby nie “telepało”)
+        # (małe, bo i tak masz smoothing w FeatureExtractor)
+        alpha = 0.35
+        vals = (1.0 - alpha) * self._prev_vals + alpha * vals
+        self._prev_vals = vals
+
+        # gate na pasmach
+        vals = vals.copy()
         vals[vals < self.gate] = 0.0
 
         # intensity tylko skaluje wysokość, NIE jasność
@@ -134,7 +157,7 @@ class BarsEffect:
 
         target = vals * (self.h - 1)
 
-        dt = float(dt)
+        dt = float(dt) if dt else 0.02
         fall = self.decay * dt
         peak_fall = self.peak_decay * dt
         a = self.attack
@@ -160,13 +183,12 @@ class BarsEffect:
             r, g, b = self._colors[x]
 
             if hh > 0:
+                base = x
                 for y in range(hh + 1):
-                    idx = y * self.w + x
-                    frame[idx] = (r, g, b)
+                    frame[y * self.w + base] = (r, g, b)
 
-            if 0 <= py < self.h and py > 0:
+            if 0 < py < self.h:
                 pidx = py * self.w + x
-                # peak trochę jaśniejszy, ale nadal ograniczony
                 frame[pidx] = (min(255, int(r * 1.25)),
                                min(255, int(g * 1.25)),
                                min(255, int(b * 1.25)))
