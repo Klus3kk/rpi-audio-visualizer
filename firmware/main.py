@@ -1,4 +1,5 @@
 import time
+from firmware.effects.oscilloscope import OscilloscopeEffect
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 from firmware.audio.capture_alsa import AlsaCapture
 from firmware.audio.features import FeatureExtractor
@@ -25,7 +26,7 @@ def main():
 
     cap = AlsaCapture(samplerate=sr, blocksize=block, channels=1, device=None).start()
     fx = FeatureExtractor(samplerate=sr, nfft=block, bands=16)
-    bars = BarsEffect(w=16, h=16) # visuals testing
+    bars = OscilloscopeEffect(w=16, h=16) # visuals testing
 
     last = time.perf_counter()
     try:
