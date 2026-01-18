@@ -117,12 +117,12 @@ class BarsEffect:
         nfft = int(features.get("nfft", 1024))
         rms = float(features.get("rms", 0.0))
 
-        # cisza -> natychmiast czarno, bez wygaszania “ogonem”
-        if rms < self.rms_gate:
-            self.level *= 0.0
-            self.peak  *= 0.0
+        dt = float(dt) if dt else 0.02
+
+        silent = (rms < self.rms_gate)
+        if silent:
+            # kasujemy pamięć pasm, żeby nie “tańczyło” od szumu po ciszy
             self._prev_vals *= 0.0
-            return [(0, 0, 0)] * (self.w * self.h)
 
         # preferuj mag2 (power) z FeatureExtractor
         mag2 = features.get("mag", None)
@@ -130,7 +130,6 @@ class BarsEffect:
             mag2 = np.asarray(mag2, dtype=np.float32)
             vals = self._bands_1250hz_from_mag2(mag2, sr, nfft)
         else:
-            # fallback: użyj bands (jeśli nie ma FFT)
             bands = features.get("bands", None)
             if bands is None:
                 return [(0, 0, 0)] * (self.w * self.h)
@@ -142,8 +141,11 @@ class BarsEffect:
                 vals = bands
             vals = np.clip(vals, 0.0, 1.0)
 
-        # dodatkowe wygładzanie samych pasm (żeby nie “telepało”)
-        # (małe, bo i tak masz smoothing w FeatureExtractor)
+        # jeśli cisza: target=0, ale level/peak opadają powoli
+        if silent:
+            vals[:] = 0.0
+
+        # wygładzanie pasm (dla stabilności)
         alpha = 0.35
         vals = (1.0 - alpha) * self._prev_vals + alpha * vals
         self._prev_vals = vals
@@ -157,7 +159,6 @@ class BarsEffect:
 
         target = vals * (self.h - 1)
 
-        dt = float(dt) if dt else 0.02
         fall = self.decay * dt
         peak_fall = self.peak_decay * dt
         a = self.attack
@@ -183,14 +184,14 @@ class BarsEffect:
             r, g, b = self._colors[x]
 
             if hh > 0:
-                base = x
                 for y in range(hh + 1):
-                    frame[y * self.w + base] = (r, g, b)
+                    frame[y * self.w + x] = (r, g, b)
 
             if 0 < py < self.h:
                 pidx = py * self.w + x
                 frame[pidx] = (min(255, int(r * 1.25)),
-                               min(255, int(g * 1.25)),
-                               min(255, int(b * 1.25)))
+                            min(255, int(g * 1.25)),
+                            min(255, int(b * 1.25)))
 
         return frame
+
