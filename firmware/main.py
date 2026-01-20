@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# Run: python3 -u -m firmware.main
+# Run: sudo -E python3 -u -m firmware.main
 
 import asyncio
 import traceback
@@ -7,13 +7,13 @@ import sys
 import threading
 import time
 import queue
+import subprocess
 import numpy as np
 import sounddevice as sd
 
 from firmware.ui.lcd_ui import LCDUI
 from firmware.audio.features import FeatureExtractor
 from firmware.audio.bt_bluealsa import BlueAlsaInput
-from firmware.bt.metadata import BtMetadata, bt_metadata_loop
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 
 from firmware.effects.bars import BarsEffect
@@ -26,6 +26,16 @@ from firmware.effects.ripple import RippleEffect
 from firmware.effects.kaleidoscope import KaleidoscopeEffect
 
 from firmware.bt.ble_gatt_server import start_ble, SHARED
+
+
+# optional DBus metadata (works only if dbus_next installed)
+try:
+    from firmware.bt.metadata import BtMetadata, bt_metadata_loop
+    HAS_META = True
+except Exception:
+    BtMetadata = None
+    bt_metadata_loop = None
+    HAS_META = False
 
 
 W, H = 16, 16
@@ -66,6 +76,17 @@ def clamp_gain(v, default=1.0):
     if not np.isfinite(g):
         g = float(default)
     return max(0.05, min(6.0, g))
+
+
+def bt_connect(addr: str):
+    if not addr:
+        return
+    subprocess.run(
+        ["bluetoothctl", "connect", addr],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        check=False,
+    )
 
 
 def make_effects(w=W, h=H):
@@ -256,12 +277,16 @@ class AudioHub:
 
 
 def main():
-    print("[INIT] Starting Visualizer firmware...")
-
     threading.Thread(target=ble_thread, daemon=True).start()
 
-    meta = BtMetadata()
-    threading.Thread(target=lambda: asyncio.run(bt_metadata_loop(meta)), daemon=True).start()
+    meta = None
+    if HAS_META:
+        try:
+            meta = BtMetadata()
+            threading.Thread(target=lambda: asyncio.run(bt_metadata_loop(meta)), daemon=True).start()
+        except Exception as e:
+            log_exc("BtMetadata thread", e)
+            meta = None
 
     ui = LCDUI(
         dc=25, rst=24, cs_gpio=5,
@@ -314,8 +339,6 @@ def main():
         "treble": 0.0,
     }
 
-    print("[RUN] Main loop started")
-
     try:
         while True:
             now = time.monotonic()
@@ -344,6 +367,11 @@ def main():
                 current_mode = desired_mode
                 if current_mode == "bt":
                     bt_addr = str(st.get("device_addr", "")).strip() or None
+
+                    if bt_addr:
+                        bt_connect(bt_addr)
+                        time.sleep(0.3)
+
                     try:
                         audio.start_bt(bt_addr)
                     except Exception as e:
@@ -377,7 +405,7 @@ def main():
                         title  = str(st.get("title", "") or "")
                         album  = str(st.get("album", "") or "")
 
-                        if not artist and not title:
+                        if meta is not None and (not artist and not title):
                             ms = meta.snapshot()
                             artist = ms.get("artist", "") or artist
                             title  = ms.get("title", "") or title
@@ -421,9 +449,8 @@ def main():
             time.sleep(0.001)
 
     except KeyboardInterrupt:
-        print("\n[STOP] Keyboard interrupt")
+        pass
     finally:
-        print("[CLEANUP] Shutting down...")
         try:
             audio.close()
         except Exception:
@@ -441,7 +468,6 @@ def main():
             ui.close()
         except Exception:
             pass
-        print("[EXIT] Goodbye!")
 
 
 if __name__ == "__main__":
