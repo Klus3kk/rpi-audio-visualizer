@@ -1,16 +1,12 @@
 import time
 import spidev
 import lgpio
+import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageOps
 from typing import Optional
 
-class LCDUI:
-    """
-    LCD UI z okładką albumu + metadata dla BT.
-    - MIC: pokazuje audio meters
-    - BT: pokazuje okładkę (jeśli dostępna) + wykonawca + tytuł
-    """
 
+class LCDUI:
     def __init__(
         self,
         *,
@@ -47,7 +43,6 @@ class LCDUI:
         self.WP = int(w_panel)
         self.HP = int(h_panel)
 
-        # rysujemy logicznie 320x240 (landscape), potem obrót -> 240x320
         self.W = 320
         self.H = 240
 
@@ -55,11 +50,12 @@ class LCDUI:
         self.accent = tuple(accent)
         self.dim = float(dim)
 
-        # state
         self.mode = "mic"
         self.effect = "bars"
         self.intensity = 0.75
         self.color_mode = "auto"
+        self.gain = 1.0
+        self.smoothing = 0.65
 
         self.rms = 0.0
         self.bass = 0.0
@@ -73,10 +69,9 @@ class LCDUI:
         self.artist = ""
         self.title = ""
         self.album = ""
-        
+
         self._cover_cache: Optional[Image.Image] = None
 
-        # fonts
         try:
             self.font = ImageFont.truetype(font_path, font_size)
             self.font_big = ImageFont.truetype(font_path, font_size_big)
@@ -86,14 +81,12 @@ class LCDUI:
             self.font_big = ImageFont.load_default()
             self.font_small = ImageFont.load_default()
 
-        # GPIO
         self.gh = lgpio.gpiochip_open(0)
         lgpio.gpio_claim_output(self.gh, self.DC, 0)
         lgpio.gpio_claim_output(self.gh, self.RST, 1)
         if self.CS is not None:
             lgpio.gpio_claim_output(self.gh, self.CS, 1)
 
-        # SPI
         self.spi = spidev.SpiDev()
         self.spi.open(self.spi_bus, self.spi_dev)
         self.spi.max_speed_hz = self.spi_hz
@@ -102,7 +95,6 @@ class LCDUI:
         self._init_st7789()
         self._fill_black()
 
-    # -------- public API --------
     def set_mode(self, mode: str):
         self.mode = "bt" if str(mode).lower() == "bt" else "mic"
 
@@ -114,14 +106,33 @@ class LCDUI:
             x = float(intensity)
         except Exception:
             x = self.intensity
-        if x < 0.0: x = 0.0
-        if x > 1.0: x = 1.0
+        if x < 0.0:
+            x = 0.0
+        if x > 1.0:
+            x = 1.0
         self.intensity = x
 
         cm = str(color_mode or "auto").lower()
         if cm not in ("auto", "rainbow", "mono"):
             cm = "auto"
         self.color_mode = cm
+
+    def set_audio_params(self, *, gain: float, smoothing: float):
+        try:
+            g = float(gain)
+        except Exception:
+            g = self.gain
+        if not np.isfinite(g):
+            g = self.gain
+        self.gain = max(0.1, min(6.0, g))
+
+        try:
+            s = float(smoothing)
+        except Exception:
+            s = self.smoothing
+        if not np.isfinite(s):
+            s = self.smoothing
+        self.smoothing = max(0.0, min(0.95, s))
 
     def set_mic_feats(self, *, rms: float, bass: float, mid: float, treble: float):
         self.rms = float(rms)
@@ -152,7 +163,6 @@ class LCDUI:
         except Exception:
             pass
 
-    # -------- HW helpers --------
     def _w(self, pin, val):
         lgpio.gpio_write(self.gh, pin, 1 if val else 0)
 
@@ -179,21 +189,29 @@ class LCDUI:
         self._cs_high()
 
     def _reset(self):
-        self._w(self.RST, 1); time.sleep(0.02)
-        self._w(self.RST, 0); time.sleep(0.05)
-        self._w(self.RST, 1); time.sleep(0.12)
+        self._w(self.RST, 1)
+        time.sleep(0.02)
+        self._w(self.RST, 0)
+        time.sleep(0.05)
+        self._w(self.RST, 1)
+        time.sleep(0.12)
 
     def _init_st7789(self):
         self._reset()
-        self._cmd(0x01); time.sleep(0.12)  # SWRESET
-        self._cmd(0x11); time.sleep(0.12)  # SLPOUT
-        self._cmd(0x3A); self._data([0x55])  # 16-bit
-        self._cmd(0x36); self._data([0x00])  # MADCTL (rotację robimy w PIL)
+        self._cmd(0x01)
+        time.sleep(0.12)
+        self._cmd(0x11)
+        time.sleep(0.12)
+        self._cmd(0x3A)
+        self._data([0x55])
+        self._cmd(0x36)
+        self._data([0x00])
         if self.panel_invert:
-            self._cmd(0x21)  # INVON
+            self._cmd(0x21)
         else:
-            self._cmd(0x20)  # INVOFF
-        self._cmd(0x29); time.sleep(0.12)  # DISPON
+            self._cmd(0x20)
+        self._cmd(0x29)
+        time.sleep(0.12)
 
     def _set_window(self, x0, y0, x1, y1):
         self._cmd(0x2A)
@@ -223,14 +241,13 @@ class LCDUI:
         self._cs_low()
         chunk = 4096
         for i in range(0, len(buf), chunk):
-            self.spi.writebytes(buf[i:i + chunk])
+            self.spi.writebytes(buf[i : i + chunk])
         self._cs_high()
 
     def _fill_black(self):
         img = Image.new("RGB", (self.WP, self.HP), (0, 0, 0))
         self._display_240x320(img)
 
-    # -------- drawing helpers --------
     @staticmethod
     def _clamp8(x: int) -> int:
         return 0 if x < 0 else (255 if x > 255 else x)
@@ -248,9 +265,7 @@ class LCDUI:
         return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
 
     def render(self):
-        # colors
         ACC = self._mul(self.accent, self.dim)
-        ACC2 = self._mul(self.accent, self.dim * 0.40)
         TXT = self._mul((230, 240, 255), self.dim)
         SUB = self._mul((110, 130, 150), self.dim)
         GRID = self._mul((0, 50, 90), self.dim)
@@ -258,12 +273,10 @@ class LCDUI:
         img = Image.new("RGB", (self.W, self.H), self.bg)
         d = ImageDraw.Draw(img)
 
-        # header
         d.rectangle((0, 0, self.W - 1, 34), fill=(0, 0, 0), outline=GRID, width=2)
         d.text((10, 7), "VISUALIZER", fill=TXT, font=self.font)
         d.text((170, 7), self._ell(f"FX:{self.effect}", 12), fill=SUB, font=self.font)
 
-        # tabs
         tab_y0, tab_y1 = 40, 72
 
         def tab(x0, label, active):
@@ -279,11 +292,9 @@ class LCDUI:
         tab(10, "MIC", self.mode == "mic")
         tab(110, "BT", self.mode == "bt")
 
-        # main panel
         d.rectangle((10, 78, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)
 
         if self.mode == "mic":
-            # MIC MODE: audio meters (jak dotychczas)
             d.text((18, 86), "AUDIO", fill=ACC, font=self.font)
             d.text((18, 106), f"RMS {self.rms:.3f}", fill=TXT, font=self.font_small)
             d.text((18, 124), f"B  {self.bass:.2f}", fill=SUB, font=self.font_small)
@@ -296,35 +307,28 @@ class LCDUI:
             d.text((rx, 124), self._ell(self.status or "mic mode", 18), fill=SUB, font=self.font_small)
 
         else:
-            # BT MODE: metadata 
             if self.bt_connected:
-                # Now Playing info (centered, larger text)
                 d.text((18, 110), "NOW PLAYING", fill=ACC, font=self.font_small)
-                
-                # Artist (big, bold)
                 artist_txt = self._ell(self.artist or "Unknown Artist", 24)
                 d.text((18, 130), artist_txt, fill=TXT, font=self.font_big)
-                
-                # Title
+
                 title_txt = self._ell(self.title or "Unknown Title", 28)
                 d.text((18, 155), title_txt, fill=TXT, font=self.font)
-                
-                # Album (smaller, dimmed)
+
                 if self.album:
                     album_txt = self._ell(self.album, 28)
                     d.text((18, 175), album_txt, fill=SUB, font=self.font_small)
 
-                # Device info at bottom
                 d.text((18, 200), "DEVICE", fill=ACC, font=self.font_small)
                 d.text((18, 216), self._ell(self.bt_name, 24), fill=SUB, font=self.font_small)
             else:
                 d.text((18, 110), "NOT CONNECTED", fill=SUB, font=self.font)
 
-        # bottom status strip
         d.rectangle((10, self.H - 38, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)
         d.text((18, self.H - 32), f"INT {self.intensity:.2f}", fill=SUB, font=self.font_small)
-        
-        # rotate + mirror to panel
+        d.text((120, self.H - 32), f"GAIN {self.gain:.2f}", fill=SUB, font=self.font_small)
+        d.text((230, self.H - 32), f"SM {self.smoothing:.2f}", fill=SUB, font=self.font_small)
+
         out = img.rotate(self.rotate, expand=True)
         if self.mirror:
             out = ImageOps.mirror(out)

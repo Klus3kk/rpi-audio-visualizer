@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+# firmware/main.py
 # Run: sudo -E python3 -u -m firmware.main
 
 import asyncio
@@ -422,6 +423,7 @@ def main():
                     ui.set_mode(current_mode)
                     ui.set_effect(effect_name)
                     ui.set_visual_params(intensity=params["intensity"], color_mode=params["color_mode"])
+                    ui.set_audio_params(gain=params["gain"], smoothing=params["smoothing"])
                     ui.set_mic_feats(
                         rms=float(last_feats.get("rms", 0.0)),
                         bass=float(last_feats.get("bass", 0.0)),
