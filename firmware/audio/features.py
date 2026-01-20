@@ -51,10 +51,12 @@ class FeatureExtractor:
         band_db = (smoothing * self.prev_bands) + ((1.0 - smoothing) * band_db)
         self.prev_bands = band_db
 
-        # STAŁA skala: noise floor i zakres dynamiczny
-        NOISE_FLOOR_DB = -85.0
-        RANGE_DB = 55.0
-        RMS_GATE = 0.006
+        # Adaptacyjna skala zależna od źródła (parametr opcjonalny)
+        # Spotify/BT: -14 LUFS (głośniejsze), Mic: -30 LUFS (cichsze)
+        # Możemy to wykryć po RMS, ale na razie STAŁA skala uniwersalna:
+        NOISE_FLOOR_DB = -80.0   # niżej = więcej czułości na ciche dźwięki
+        RANGE_DB = 50.0          # zakres dynamiczny
+        RMS_GATE = 0.004         # próg ciszy (niżej niż wcześniej)
 
         # mapowanie do 0..1
         bands_norm = (band_db - NOISE_FLOOR_DB) / RANGE_DB
