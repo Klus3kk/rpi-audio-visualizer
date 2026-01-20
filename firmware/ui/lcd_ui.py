@@ -304,7 +304,6 @@ class LCDUI:
             rx = 150
             d.text((rx, 86), "MODE", fill=ACC, font=self.font)
             d.text((rx, 106), "MIC INPUT", fill=TXT, font=self.font_small)
-            d.text((rx, 124), self._ell(self.status or "mic mode", 18), fill=SUB, font=self.font_small)
 
         else:
             if self.bt_connected:
