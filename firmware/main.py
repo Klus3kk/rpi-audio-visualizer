@@ -29,17 +29,17 @@ from firmware.bt.ble_gatt_server import start_ble, SHARED
 
 
 # config
-W, H = 16, 16 # LED matrix width and height
-NUM_LEDS = W * H # Total number of LEDs
+W, H = 16, 16
+NUM_LEDS = W * H
 
-PORT = "/dev/ttyUSB0" # Serial port for LED driver
-BAUD = 115200 # Serial baud rate for LED driver (it could be 921600, but 115200 is more stable)
+PORT = "/dev/ttyUSB0"
+BAUD = 115200
 
-FPS_LED = 20.0 # LED update rate
-FPS_LCD = 20.0 # LCD update rate
+FPS_LED = 20.0
+FPS_LCD = 20.0
 
-SR = 44100 # Sample rate (for audio input - mic/BT)
-NFFT = 1024 # FFT size for feature extraction 
+SR = 44100
+NFFT = 1024
 
 
 # ===== HELPERS =====
@@ -269,16 +269,16 @@ def main():
 
     # Initialize LCD
     ui = LCDUI(
-        dc=25, rst=24, cs_gpio=5,
-        spi_bus=0, spi_dev=0, spi_hz=24_000_000,
-        rotate=270,
-        mirror=True,
-        panel_invert=True,
-        dim=0.90,
-        font_size=13,
-        font_size_big=17,
-        accent=(30, 140, 255),
-        bg=(0, 0, 0),
+        dc=25, rst=24, cs_gpio=5, # GPIO pins (DC=25, RST=24, CS=5)
+        spi_bus=0, spi_dev=0, spi_hz=24_000_000, # SPI config (spi_bus = SPI0, spi_dev = CE0, spi_hz = 24MHz)
+        rotate=270, # Rotate display 
+        mirror=True, # Mirrors the display horizontally
+        panel_invert=True, # Black on white panel
+        dim=0.80, # Initial brightness (0.0-1.0)
+        font_size=13, # Default font size
+        font_size_big=17, # Big font size
+        accent=(30, 140, 255), # Accent color (blue)
+        bg=(0, 0, 0), # Background color (white/black)
     )
 
     # Initialize LED driver
@@ -298,29 +298,6 @@ def main():
     effect_name = "bars"
     effect = effects[effect_name]
 
-    # ===== LCD UPDATE =====
-    if now - t_lcd >= dt_lcd:
-        t_lcd = now
-        try:
-            ui.set_mode(current_mode)
-            ui.set_effect(effect_name)
-            ui.set_visual_params(intensity=params["intensity"], color_mode=params["color_mode"])
-            ui.set_mic_feats(...)
-            
-            if current_mode == "bt":
-                # DODAJ TEN DEBUG:
-                print(f"[DEBUG] BT metadata: artist={st.get('artist')}, title={st.get('title')}, album={st.get('album')}")
-                
-                ui.set_bt(
-                    connected=bool(st.get("connected", True)),
-                    device_name=str(st.get("device_name", "")),
-                    device_addr=str(st.get("device_addr", "")),
-                )
-                artist = str(st.get("artist", "") or "")
-                title  = str(st.get("title", "") or "")
-                album  = str(st.get("album", "") or "")
-                ui.set_track(artist=artist, title=title, album=album)
-                
     # Default params
     params = {
         "intensity": 0.75,
@@ -412,6 +389,10 @@ def main():
                         artist = str(st.get("artist", "") or "")
                         title  = str(st.get("title", "") or "")
                         album  = str(st.get("album", "") or "")
+                        
+                        # DEBUG
+                        print(f"[DEBUG] BT metadata: artist={artist}, title={title}, album={album}")
+                        
                         ui.set_track(artist=artist, title=title, album=album)
                         ui.set_status(f"bt | gain={params['gain']:.2f}")
                     else:
