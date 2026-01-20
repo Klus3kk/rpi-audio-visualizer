@@ -1,4 +1,3 @@
-# firmware/ui/lcd_ui.py
 import time
 import spidev
 import lgpio
@@ -23,7 +22,7 @@ class LCDUI:
         cs_gpio=5,
         rotate=270,
         mirror=True,
-        panel_invert=True,
+        panel_invert=False,
         w_panel=240,
         h_panel=320,
         font_path="/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -297,9 +296,7 @@ class LCDUI:
             d.text((rx, 124), self._ell(self.status or "mic mode", 18), fill=SUB, font=self.font_small)
 
         else:
-            # BT MODE: metadata (text only, no cover)
-            d.text((18, 86), "BLUETOOTH", fill=ACC, font=self.font)
-            
+            # BT MODE: metadata 
             if self.bt_connected:
                 # Now Playing info (centered, larger text)
                 d.text((18, 110), "NOW PLAYING", fill=ACC, font=self.font_small)
@@ -326,8 +323,7 @@ class LCDUI:
         # bottom status strip
         d.rectangle((10, self.H - 38, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)
         d.text((18, self.H - 32), f"INT {self.intensity:.2f}", fill=SUB, font=self.font_small)
-        d.text((92, self.H - 32), f"CLR {self.color_mode}", fill=SUB, font=self.font_small)
-
+        
         # rotate + mirror to panel
         out = img.rotate(self.rotate, expand=True)
         if self.mirror:

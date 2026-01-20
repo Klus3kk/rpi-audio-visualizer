@@ -47,7 +47,7 @@ class VisualizerRemoteApp extends StatelessWidget {
       title: 'Visualizer',
       theme: base.copyWith(
         scaffoldBackgroundColor: Retro.bg,
-        textTheme: GoogleFonts.vt323TextTheme(base.textTheme).apply(
+        textTheme: GoogleFonts.robotoMonoTextTheme(base.textTheme).apply(
           bodyColor: Colors.white,
           displayColor: Colors.white,
         ),
@@ -117,19 +117,19 @@ class _PermissionGateState extends State<PermissionGate> {
             child: Column(
               mainAxisSize: MainAxisSize.min,
               children: [
-                const Icon(Icons.bluetooth, size: 64, color: Retro.yellow),
+                const Icon(Icons.bluetooth, size: 56, color: Retro.yellow),
                 const SizedBox(height: 12),
-                const Text('BLUETOOTH REQUIRED', style: TextStyle(fontSize: 26, letterSpacing: 2)),
+                const Text('BLUETOOTH REQUIRED', style: TextStyle(fontSize: 16, letterSpacing: 2)),
                 const SizedBox(height: 10),
                 const Text(
                   'App needs Bluetooth permissions to control your Visualizer (RPi).',
                   textAlign: TextAlign.center,
-                  style: TextStyle(fontSize: 18, color: Colors.white70),
+                  style: TextStyle(fontSize: 12, color: Colors.white70),
                 ),
                 const SizedBox(height: 14),
                 SizedBox(
                   width: double.infinity,
-                  height: 48,
+                  height: 42,
                   child: ElevatedButton(
                     onPressed: _request,
                     style: ElevatedButton.styleFrom(
@@ -138,7 +138,7 @@ class _PermissionGateState extends State<PermissionGate> {
                       shape: const BeveledRectangleBorder(),
                       side: BorderSide(color: Retro.yellow.withOpacity(0.65), width: 2),
                     ),
-                    child: const Text('ENABLE', style: TextStyle(letterSpacing: 2, fontSize: 18)),
+                    child: const Text('ENABLE', style: TextStyle(letterSpacing: 2, fontSize: 13)),
                   ),
                 ),
               ],
@@ -150,11 +150,11 @@ class _PermissionGateState extends State<PermissionGate> {
   }
 }
 
-// ===================== Data model =====================
+// datamodel
 class VizState {
-  final String mode; // mic | bt
+  final String mode;
   final String effect;
-  final double brightness;
+  // final double brightness;
   final double intensity;
   final double gain;
   final double smoothing;
@@ -163,7 +163,7 @@ class VizState {
   const VizState({
     required this.mode,
     required this.effect,
-    required this.brightness,
+    // required this.brightness,
     required this.intensity,
     required this.gain,
     required this.smoothing,
@@ -173,7 +173,7 @@ class VizState {
   factory VizState.initial() => const VizState(
         mode: 'mic',
         effect: 'bars',
-        brightness: 0.55,
+        // brightness: 0.55,
         intensity: 0.75,
         gain: 1.0,
         smoothing: 0.65,
@@ -183,7 +183,7 @@ class VizState {
   VizState copyWith({
     String? mode,
     String? effect,
-    double? brightness,
+    // double? brightness,
     double? intensity,
     double? gain,
     double? smoothing,
@@ -192,7 +192,7 @@ class VizState {
     return VizState(
       mode: mode ?? this.mode,
       effect: effect ?? this.effect,
-      brightness: brightness ?? this.brightness,
+      // brightness: brightness ?? this.brightness,
       intensity: intensity ?? this.intensity,
       gain: gain ?? this.gain,
       smoothing: smoothing ?? this.smoothing,
@@ -203,7 +203,7 @@ class VizState {
   Map<String, dynamic> toJson() => {
         'mode': mode,
         'effect': effect,
-        'brightness': brightness,
+        // 'brightness': brightness,
         'intensity': intensity,
         'gain': gain,
         'smoothing': smoothing,
@@ -223,7 +223,7 @@ class VizState {
     return VizState(
       mode: (j['mode'] ?? fb.mode).toString(),
       effect: (j['effect'] ?? fb.effect).toString(),
-      brightness: d(j['brightness'], fb.brightness).clamp(0.0, 1.0),
+      // brightness: d(j['brightness'], fb.brightness).clamp(0.0, 1.0),
       intensity: d(j['intensity'], fb.intensity).clamp(0.0, 1.0),
       gain: d(j['gain'], fb.gain).clamp(0.1, 6.0),
       smoothing: d(j['smoothing'], fb.smoothing).clamp(0.0, 0.95),
@@ -273,7 +273,6 @@ class BleController {
     if (_lastDeviceId != null) {
       final cached = FlutterBluePlus.connectedDevices.where((d) => d.remoteId.str == _lastDeviceId).toList();
       if (cached.isNotEmpty) {
-        print('[BLE] Found cached device: ${cached.first.platformName}');
         await _connect(cached.first);
         _scanInFlight = false;
         return;
@@ -284,10 +283,7 @@ class BleController {
 
     _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) async {
-      print('[BLE] Scan results: ${results.length} devices found');
       for (final r in results) {
-        print('[BLE] Device: ${r.device.platformName} | ${r.device.remoteId} | Services: ${r.advertisementData.serviceUuids}');
-        
         final name = r.device.platformName;
         final matchesName = name == kDeviceName;
 
@@ -297,7 +293,6 @@ class BleController {
         final matchesSvc = advUuids.contains(kSvc.toLowerCase());
 
         if (matchesName || matchesSvc) {
-          print('[BLE] Found Visualizer: $name');
           try {
             await FlutterBluePlus.stopScan();
           } catch (_) {}
@@ -310,7 +305,7 @@ class BleController {
     Future.delayed(timeout + const Duration(milliseconds: 500), () {
       if (status.value == ConnStatus.scanning) {
         status.value = ConnStatus.error;
-        error.value = 'Visualizer not found. Try again or move closer to device.';
+        error.value = 'Visualizer not found';
       }
       _scanInFlight = false;
     });
@@ -345,11 +340,9 @@ class BleController {
       error.value = null;
 
       await sendFullState(desired.value);
-      print('[BLE] Connected successfully to ${d.platformName}');
     } catch (e) {
       status.value = ConnStatus.error;
       error.value = 'Setup failed: $e';
-      print('[BLE] Setup error: $e');
     } finally {
       _scanInFlight = false;
     }
@@ -455,7 +448,6 @@ class _RootState extends State<Root> {
       if (ble.status.value == ConnStatus.error && ble.device != null) {
         Future.delayed(const Duration(seconds: 2), () {
           if (ble.status.value == ConnStatus.error) {
-            print('[BLE] Auto-reconnecting...');
             _connectWithRetry(2);
           }
         });
@@ -467,6 +459,7 @@ class _RootState extends State<Root> {
     if (Platform.isAndroid) {
       _mediaListener = MediaListener(context);
       _mediaListener.onMediaChanged = (info) {
+        print('[MEDIA] Artist: ${info.artist}, Title: ${info.title}');
         if (ble.status.value == ConnStatus.connected && ble.desired.value.mode == 'bt') {
           ble.sendPatch({
             'artist': info.artist,
@@ -493,18 +486,14 @@ class _RootState extends State<Root> {
     int attempt = 0;
     while (attempt < maxRetries) {
       attempt++;
-      print('[BLE] Connect attempt $attempt/$maxRetries');
-      
       await ble.scanAndConnect(timeout: const Duration(seconds: 10));
       await Future.delayed(const Duration(milliseconds: 500));
       
       if (ble.status.value == ConnStatus.connected) {
-        print('[BLE] Connected on attempt $attempt');
         return;
       }
       
       if (ble.status.value == ConnStatus.error && attempt < maxRetries) {
-        print('[BLE] Retry $attempt failed, trying again...');
         await Future.delayed(const Duration(seconds: 1));
       }
     }
@@ -517,14 +506,14 @@ class _RootState extends State<Root> {
 
   Widget _plate(String t, {Color accent = Retro.yellow}) {
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 3),
       decoration: BoxDecoration(
         color: Colors.black.withOpacity(0.25),
         border: Border.all(color: accent.withOpacity(0.6), width: 1.5),
       ),
       child: Text(
         t.toUpperCase(),
-        style: TextStyle(color: accent, letterSpacing: 2, fontSize: 14),
+        style: TextStyle(color: accent, letterSpacing: 1.2, fontSize: 10),
         overflow: TextOverflow.ellipsis,
       ),
     );
@@ -532,7 +521,7 @@ class _RootState extends State<Root> {
 
   Widget _btn(String text, {required VoidCallback? onPressed, Color fg = Retro.yellow, Color border = Retro.yellow}) {
     return SizedBox(
-      height: 46,
+      height: 40,
       child: ElevatedButton(
         onPressed: onPressed,
         style: ElevatedButton.styleFrom(
@@ -540,8 +529,9 @@ class _RootState extends State<Root> {
           foregroundColor: fg,
           shape: const BeveledRectangleBorder(),
           side: BorderSide(color: border.withOpacity(0.65), width: 2),
+          padding: const EdgeInsets.symmetric(horizontal: 8),
         ),
-        child: Text(text, style: const TextStyle(letterSpacing: 2, fontSize: 18)),
+        child: Text(text, style: const TextStyle(letterSpacing: 1.5, fontSize: 13)),
       ),
     );
   }
@@ -552,13 +542,13 @@ class _RootState extends State<Root> {
       children: [
         Row(
           children: [
-            Expanded(child: Text(label.toUpperCase(), style: const TextStyle(letterSpacing: 2, fontSize: 16))),
-            Text(v.toStringAsFixed(2), style: const TextStyle(fontSize: 16)),
+            Expanded(child: Text(label.toUpperCase(), style: const TextStyle(letterSpacing: 1.2, fontSize: 12))),
+            Text(v.toStringAsFixed(2), style: const TextStyle(fontSize: 12)),
           ],
         ),
         SliderTheme(
           data: SliderTheme.of(context).copyWith(
-            trackHeight: 10,
+            trackHeight: 7,
             thumbShape: const RectThumbShape(),
             overlayShape: SliderComponentShape.noOverlay,
             activeTrackColor: Retro.yellow.withOpacity(0.9),
@@ -567,8 +557,34 @@ class _RootState extends State<Root> {
           ),
           child: Slider(value: v, min: min, max: max, onChanged: onChanged),
         ),
-        const SizedBox(height: 8),
+        const SizedBox(height: 4),
       ],
+    );
+  }
+
+  Widget _modeButton(String label, bool selected, VoidCallback onTap) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        height: 40,
+        decoration: BoxDecoration(
+          color: selected ? Retro.yellow.withOpacity(0.15) : Colors.black.withOpacity(0.25),
+          border: Border.all(
+            color: selected ? Retro.yellow : Retro.edge,
+            width: selected ? 2.5 : 2,
+          ),
+        ),
+        alignment: Alignment.center,
+        child: Text(
+          label,
+          style: TextStyle(
+            color: selected ? Retro.yellow : Colors.white70,
+            fontSize: 13,
+            letterSpacing: 1.8,
+            fontWeight: selected ? FontWeight.bold : FontWeight.normal,
+          ),
+        ),
+      ),
     );
   }
 
@@ -585,51 +601,51 @@ class _RootState extends State<Root> {
               builder: (context, desired, ___) {
                 return Scaffold(
                   appBar: AppBar(
-                    title: const Text('VISUALIZER'),
+                    title: const Text('VISUALIZER', style: TextStyle(fontSize: 15, letterSpacing: 2)),
                     backgroundColor: Retro.panel,
                   ),
                   body: ListView(
-                    padding: const EdgeInsets.all(12),
+                    padding: const EdgeInsets.all(10),
                     children: [
                       CutPanel(
-                        cut: 10,
+                        cut: 7,
                         child: Row(
                           children: [
                             Container(
-                              width: 10,
-                              height: 10,
+                              width: 7,
+                              height: 7,
                               color: st == ConnStatus.connected
                                   ? Retro.ok
                                   : (st == ConnStatus.error ? Retro.bad : Retro.yellow),
                             ),
-                            const SizedBox(width: 10),
+                            const SizedBox(width: 7),
                             Expanded(child: _plate('LINK: ${st.name}', accent: Retro.yellow)),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 5),
                             Expanded(child: _plate('MODE: ${desired.mode}', accent: Retro.yellow)),
-                            const SizedBox(width: 8),
+                            const SizedBox(width: 5),
                             Expanded(child: _plate('FX: ${desired.effect}', accent: Retro.yellow)),
                           ],
                         ),
                       ),
 
                       if (err != null) ...[
-                        const SizedBox(height: 10),
-                        CutPanel(cut: 10, child: Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 18))),
+                        const SizedBox(height: 8),
+                        CutPanel(cut: 7, child: Text('ERR: $err', style: const TextStyle(color: Colors.redAccent, fontSize: 12))),
                       ],
 
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 8),
 
                       CutPanel(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('CONNECTION', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                            const SizedBox(height: 10),
+                            Text('CONNECTION', style: TextStyle(color: Retro.yellow, fontSize: 13, letterSpacing: 1.5)),
+                            const SizedBox(height: 7),
                             Row(
                               children: [
                                 Expanded(
                                   child: _btn(
-                                    (st == ConnStatus.scanning) ? 'SCANNING…' : 'CONNECT',
+                                    (st == ConnStatus.scanning) ? 'SCAN...' : 'CONNECT',
                                     onPressed: (st == ConnStatus.scanning || st == ConnStatus.connecting)
                                         ? null
                                         : () {
@@ -637,7 +653,7 @@ class _RootState extends State<Root> {
                                           },
                                   ),
                                 ),
-                                const SizedBox(width: 10),
+                                const SizedBox(width: 7),
                                 Expanded(
                                   child: _btn(
                                     'DISCONNECT',
@@ -651,42 +667,50 @@ class _RootState extends State<Root> {
                           ],
                         ),
                       ),
-                      const SizedBox(height: 12),
+                      const SizedBox(height: 8),
 
                       CutPanel(
                         child: Column(
                           crossAxisAlignment: CrossAxisAlignment.start,
                           children: [
-                            Text('MODE', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                            const SizedBox(height: 10),
+                            Text('MODE', style: TextStyle(color: Retro.yellow, fontSize: 13, letterSpacing: 1.5)),
+                            const SizedBox(height: 7),
 
-                            SegmentedButton<String>(
-                              segments: const [
-                                ButtonSegment(value: 'mic', label: Text('MIC')),
-                                ButtonSegment(value: 'bt', label: Text('BT')),
+                            Row(
+                              children: [
+                                Expanded(
+                                  child: _modeButton('MIC', desired.mode == 'mic', () {
+                                    final next = desired.copyWith(mode: 'mic');
+                                    ble.desired.value = next;
+                                    if (ble.status.value == ConnStatus.connected) {
+                                      ble.sendPatch({'mode': 'mic'});
+                                    }
+                                  }),
+                                ),
+                                const SizedBox(width: 7),
+                                Expanded(
+                                  child: _modeButton('BT', desired.mode == 'bt', () {
+                                    final next = desired.copyWith(mode: 'bt');
+                                    ble.desired.value = next;
+                                    if (ble.status.value == ConnStatus.connected) {
+                                      ble.sendPatch({
+                                        'mode': 'bt',
+                                        'device_addr': next.deviceAddr,
+                                        'connected': true,
+                                      });
+                                    }
+                                  }),
+                                ),
                               ],
-                              selected: {desired.mode},
-                              onSelectionChanged: (set) async {
-                                final m = set.first;
-                                final next = desired.copyWith(mode: m);
-                                ble.desired.value = next;
-
-                                if (ble.status.value == ConnStatus.connected) {
-                                  await ble.sendPatch({
-                                    'mode': m,
-                                    'device_addr': next.deviceAddr,
-                                    'connected': true,
-                                  });
-                                }
-                              },
                             ),
 
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 8),
 
-                            Text('EFFECT', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                            const SizedBox(height: 10),
+                            Text('EFFECT', style: TextStyle(color: Retro.yellow, fontSize: 13, letterSpacing: 1.5)),
+                            const SizedBox(height: 7),
                             DropdownButtonFormField<String>(
                               value: desired.effect,
+                              style: const TextStyle(fontSize: 12, color: Colors.white),
                               items: const [
                                 DropdownMenuItem(value: 'bars', child: Text('BARS')),
                                 DropdownMenuItem(value: 'osc', child: Text('OSCILLOSCOPE')),
@@ -706,13 +730,16 @@ class _RootState extends State<Root> {
                                   await ble.sendPatch({'effect': v});
                                 }
                               },
-                              decoration: const InputDecoration(border: OutlineInputBorder()),
+                              decoration: const InputDecoration(
+                                border: OutlineInputBorder(),
+                                contentPadding: EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+                              ),
                             ),
 
-                            const SizedBox(height: 12),
+                            const SizedBox(height: 8),
 
-                            Text('LEVELS', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                            const SizedBox(height: 10),
+                            Text('LEVELS', style: TextStyle(color: Retro.yellow, fontSize: 13, letterSpacing: 1.5)),
+                            const SizedBox(height: 7),
 
                             _slider('Intensity', desired.intensity, 0, 1, (v) {
                               ble.desired.value = desired.copyWith(intensity: v);
@@ -721,12 +748,12 @@ class _RootState extends State<Root> {
                               });
                             }),
 
-                            _slider('Brightness', desired.brightness, 0, 1, (v) {
-                              ble.desired.value = desired.copyWith(brightness: v);
-                              _debounced(const Duration(milliseconds: 120), () {
-                                if (ble.status.value == ConnStatus.connected) ble.sendPatch({'brightness': v});
-                              });
-                            }),
+                            // _slider('Brightness', desired.brightness, 0, 1, (v) {
+                            //   ble.desired.value = desired.copyWith(brightness: v);
+                            //   _debounced(const Duration(milliseconds: 120), () {
+                            //     if (ble.status.value == ConnStatus.connected) ble.sendPatch({'brightness': v});
+                            //   });
+                            // }),
 
                             _slider('Gain', desired.gain, 0.1, 6, (v) {
                               ble.desired.value = desired.copyWith(gain: v);
@@ -760,7 +787,7 @@ class _RootState extends State<Root> {
 class CutPanel extends StatelessWidget {
   final Widget child;
   final double cut;
-  const CutPanel({super.key, required this.child, this.cut = 12});
+  const CutPanel({super.key, required this.child, this.cut = 9});
 
   @override
   Widget build(BuildContext context) {
@@ -770,12 +797,12 @@ class CutPanel extends StatelessWidget {
         decoration: BoxDecoration(
           color: Retro.panel,
           border: Border.all(color: Retro.edge, width: 2),
-          boxShadow: const [BoxShadow(blurRadius: 0, offset: Offset(6, 6), color: Colors.black54)],
+          boxShadow: const [BoxShadow(blurRadius: 0, offset: Offset(3, 3), color: Colors.black54)],
         ),
         child: Stack(
           children: [
             Positioned.fill(child: IgnorePointer(child: CustomPaint(painter: _BevelPainter()))),
-            Padding(padding: const EdgeInsets.all(14), child: child),
+            Padding(padding: const EdgeInsets.all(10), child: child),
           ],
         ),
       ),
@@ -785,7 +812,7 @@ class CutPanel extends StatelessWidget {
 
 class CutCornerClipper extends CustomClipper<Path> {
   final double cut;
-  CutCornerClipper({this.cut = 10});
+  CutCornerClipper({this.cut = 9});
 
   @override
   Path getClip(Size s) {
@@ -825,7 +852,7 @@ class _BevelPainter extends CustomPainter {
 
 class RectThumbShape extends SliderComponentShape {
   final double w, h;
-  const RectThumbShape({this.w = 18, this.h = 14});
+  const RectThumbShape({this.w = 14, this.h = 10});
 
   @override
   Size getPreferredSize(bool isEnabled, bool isDiscrete) => Size(w, h);
@@ -852,12 +879,12 @@ class RectThumbShape extends SliderComponentShape {
     final stroke = Paint()
       ..color = Colors.black.withOpacity(0.6)
       ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
+      ..strokeWidth = 1.5;
 
     canvas.drawRect(rect, fill);
     canvas.drawRect(rect, stroke);
 
     final notch = Paint()..color = Colors.black.withOpacity(0.35);
-    canvas.drawRect(Rect.fromCenter(center: center, width: 2, height: h - 4), notch);
+    canvas.drawRect(Rect.fromCenter(center: center, width: 1.5, height: h - 3), notch);
   }
 }

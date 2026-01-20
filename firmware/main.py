@@ -276,7 +276,7 @@ def main():
         panel_invert=True,
         dim=0.90,
         font_size=13,
-        font_size_big=18,
+        font_size_big=17,
         accent=(30, 140, 255),
         bg=(0, 0, 0),
     )
@@ -298,6 +298,29 @@ def main():
     effect_name = "bars"
     effect = effects[effect_name]
 
+    # ===== LCD UPDATE =====
+    if now - t_lcd >= dt_lcd:
+        t_lcd = now
+        try:
+            ui.set_mode(current_mode)
+            ui.set_effect(effect_name)
+            ui.set_visual_params(intensity=params["intensity"], color_mode=params["color_mode"])
+            ui.set_mic_feats(...)
+            
+            if current_mode == "bt":
+                # DODAJ TEN DEBUG:
+                print(f"[DEBUG] BT metadata: artist={st.get('artist')}, title={st.get('title')}, album={st.get('album')}")
+                
+                ui.set_bt(
+                    connected=bool(st.get("connected", True)),
+                    device_name=str(st.get("device_name", "")),
+                    device_addr=str(st.get("device_addr", "")),
+                )
+                artist = str(st.get("artist", "") or "")
+                title  = str(st.get("title", "") or "")
+                album  = str(st.get("album", "") or "")
+                ui.set_track(artist=artist, title=title, album=album)
+                
     # Default params
     params = {
         "intensity": 0.75,
@@ -352,10 +375,6 @@ def main():
                     params["smoothing"] = max(0.0, min(0.95, sm))
             except Exception:
                 pass
-
-            cm = str(st.get("color_mode", params["color_mode"])).lower()
-            if cm in ("auto", "rainbow", "mono"):
-                params["color_mode"] = cm
 
             # ===== MODE SWITCH =====
             if desired_mode != current_mode:

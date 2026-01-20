@@ -4,7 +4,8 @@ from firmware.effects.common import safe_bands, safe_rms, blank_frame
 
 class KaleidoscopeEffect:
     """
-    Kaleidoscopic mandala - 6-fold symmetry, audio-reactive colors.
+    Kaleidoscopic mandala - 8-fold symmetry, audio-reactive colors.
+    Ciemniejsza, bardziej wyraźna wersja.
     """
     def __init__(self, w=16, h=16):
         self.w = int(w)
@@ -23,7 +24,8 @@ class KaleidoscopeEffect:
             
             intensity = float((params or {}).get("intensity", 0.75))
             
-            self.t += dt * (0.5 + 2.0 * bass)
+            # Szybsza rotacja na bass
+            self.t += dt * (0.8 + 3.5 * bass)
 
             frame = blank_frame(self.w, self.h)
 
@@ -37,20 +39,23 @@ class KaleidoscopeEffect:
                     r = np.sqrt(dx * dx + dy * dy)
                     theta = np.arctan2(dy, dx)
                     
-                    # 6-fold symmetry
-                    n_folds = 6
+                    # 8-fold symmetry (więcej płatków)
+                    n_folds = 8
                     theta_folded = (theta % (2 * np.pi / n_folds)) * n_folds
                     
-                    # Pattern: concentric rings + radial lines
-                    ring_pattern = np.sin(r * 0.8 + self.t) * 0.5 + 0.5
-                    radial_pattern = np.sin(theta_folded * 3 + self.t * 0.5) * 0.5 + 0.5
+                    # Pattern: wyraźniejsze pierścienie + linie radialne
+                    ring_pattern = np.sin(r * 1.2 + self.t) * 0.5 + 0.5
+                    radial_pattern = np.sin(theta_folded * 4 + self.t * 0.6) * 0.5 + 0.5
                     
-                    pattern = (ring_pattern + radial_pattern) / 2.0
+                    # Ostrzejsze łączenie wzorów
+                    pattern = np.maximum(ring_pattern * 0.7, radial_pattern * 0.3)
                     
                     # Audio-reactive colors
-                    hue = (pattern + bass * 0.3 + mid * 0.2) % 1.0
-                    sat = 0.8 + 0.2 * treble
-                    val = pattern * 0.4 * intensity
+                    hue = (pattern * 0.6 + bass * 0.4 + mid * 0.2 + self.t * 0.1) % 1.0
+                    sat = 0.9 + 0.1 * treble
+                    
+                    # Ciemniej - było 0.4, teraz max 0.22
+                    val = pattern * 0.22 * intensity
                     
                     r_c, g_c, b_c = colorsys.hsv_to_rgb(hue, min(1.0, sat), val)
                     frame[y * self.w + x] = (int(r_c * 255), int(g_c * 255), int(b_c * 255))
