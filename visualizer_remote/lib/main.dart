@@ -7,12 +7,15 @@ import 'package:flutter_blue_plus/flutter_blue_plus.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:permission_handler/permission_handler.dart';
 
+// Import MediaListener (Android only)
+import 'media_listener.dart';
+
 // ===================== BLE UUIDs =====================
 const String kDeviceName = 'Visualizer';
 
 const String kSvc = '12345678-1234-5678-1234-56789abcdef0';
 const String kCmd = '12345678-1234-5678-1234-56789abcdef9';   // WRITE
-const String kState = '12345678-1234-5678-1234-56789abcdef8'; // READ/NOTIFY (opcjonalne)
+const String kState = '12345678-1234-5678-1234-56789abcdef8'; // READ/NOTIFY
 
 // ===================== UI theme =====================
 class Retro {
@@ -155,9 +158,7 @@ class VizState {
   final double intensity;
   final double gain;
   final double smoothing;
-  final String deviceAddr; // MAC for BlueALSA A2DP (optional but recommended)
-  final String artist;
-  final String title;
+  final String deviceAddr;
 
   const VizState({
     required this.mode,
@@ -167,8 +168,6 @@ class VizState {
     required this.gain,
     required this.smoothing,
     required this.deviceAddr,
-    required this.artist,
-    required this.title,
   });
 
   factory VizState.initial() => const VizState(
@@ -178,9 +177,7 @@ class VizState {
         intensity: 0.75,
         gain: 1.0,
         smoothing: 0.65,
-        deviceAddr: 'BC:A0:80:E0:B9:4E', // ustaw domyślnie swój telefon (możesz zmienić w UI)
-        artist: '',
-        title: '',
+        deviceAddr: 'BC:A0:80:E0:B9:4E',
       );
 
   VizState copyWith({
@@ -191,8 +188,6 @@ class VizState {
     double? gain,
     double? smoothing,
     String? deviceAddr,
-    String? artist,
-    String? title,
   }) {
     return VizState(
       mode: mode ?? this.mode,
@@ -202,8 +197,6 @@ class VizState {
       gain: gain ?? this.gain,
       smoothing: smoothing ?? this.smoothing,
       deviceAddr: deviceAddr ?? this.deviceAddr,
-      artist: artist ?? this.artist,
-      title: title ?? this.title,
     );
   }
 
@@ -215,8 +208,6 @@ class VizState {
         'gain': gain,
         'smoothing': smoothing,
         'device_addr': deviceAddr,
-        'artist': artist,
-        'title': title,
         'connected': true,
         'device_name': 'phone',
       };
@@ -237,8 +228,6 @@ class VizState {
       gain: d(j['gain'], fb.gain).clamp(0.1, 6.0),
       smoothing: d(j['smoothing'], fb.smoothing).clamp(0.0, 0.95),
       deviceAddr: (j['device_addr'] ?? fb.deviceAddr).toString(),
-      artist: (j['artist'] ?? fb.artist).toString(),
-      title: (j['title'] ?? fb.title).toString(),
     );
   }
 }
@@ -264,11 +253,13 @@ class BleController {
   DateTime _lastScanAt = DateTime.fromMillisecondsSinceEpoch(0);
   bool _scanInFlight = false;
 
-  Future<void> scanAndConnect({Duration timeout = const Duration(seconds: 6)}) async {
+  String? _lastDeviceId;
+
+  Future<void> scanAndConnect({Duration timeout = const Duration(seconds: 10)}) async {
     if (_scanInFlight) return;
 
     final now = DateTime.now();
-    if (now.difference(_lastScanAt) < const Duration(seconds: 2)) return;
+    if (now.difference(_lastScanAt) < const Duration(seconds: 1)) return;
     _lastScanAt = now;
 
     error.value = null;
@@ -279,21 +270,34 @@ class BleController {
       await FlutterBluePlus.stopScan();
     } catch (_) {}
 
+    if (_lastDeviceId != null) {
+      final cached = FlutterBluePlus.connectedDevices.where((d) => d.remoteId.str == _lastDeviceId).toList();
+      if (cached.isNotEmpty) {
+        print('[BLE] Found cached device: ${cached.first.platformName}');
+        await _connect(cached.first);
+        _scanInFlight = false;
+        return;
+      }
+    }
+
     await FlutterBluePlus.startScan(timeout: timeout);
 
     _scanSub?.cancel();
     _scanSub = FlutterBluePlus.scanResults.listen((results) async {
+      print('[BLE] Scan results: ${results.length} devices found');
       for (final r in results) {
+        print('[BLE] Device: ${r.device.platformName} | ${r.device.remoteId} | Services: ${r.advertisementData.serviceUuids}');
+        
         final name = r.device.platformName;
         final matchesName = name == kDeviceName;
 
-        // FIX: Guid -> String
         final advUuids = r.advertisementData.serviceUuids
             .map((g) => g.toString().toLowerCase())
             .toList();
         final matchesSvc = advUuids.contains(kSvc.toLowerCase());
 
         if (matchesName || matchesSvc) {
+          print('[BLE] Found Visualizer: $name');
           try {
             await FlutterBluePlus.stopScan();
           } catch (_) {}
@@ -303,10 +307,10 @@ class BleController {
       }
     });
 
-    Future.delayed(timeout + const Duration(milliseconds: 200), () {
+    Future.delayed(timeout + const Duration(milliseconds: 500), () {
       if (status.value == ConnStatus.scanning) {
         status.value = ConnStatus.error;
-        error.value = 'Visualizer not found';
+        error.value = 'Visualizer not found. Try again or move closer to device.';
       }
       _scanInFlight = false;
     });
@@ -317,16 +321,20 @@ class BleController {
     device = d;
     error.value = null;
 
+    _lastDeviceId = d.remoteId.str;
+
     try {
-      await d.connect(autoConnect: false, timeout: const Duration(seconds: 8));
-    } catch (_) {}
+      await d.connect(autoConnect: false, timeout: const Duration(seconds: 10));
+    } catch (e) {
+      print('[BLE] Connect failed: $e');
+    }
 
     _connSub?.cancel();
     _connSub = d.connectionState.listen((s) {
       final ok = (s == BluetoothConnectionState.connected);
       if (!ok) {
         status.value = ConnStatus.error;
-        error.value ??= 'Disconnected';
+        error.value ??= 'Connection lost';
       }
     });
 
@@ -334,11 +342,14 @@ class BleController {
       await _discover(d);
       await _enableNotifyIfPresent();
       status.value = ConnStatus.connected;
+      error.value = null;
 
       await sendFullState(desired.value);
+      print('[BLE] Connected successfully to ${d.platformName}');
     } catch (e) {
       status.value = ConnStatus.error;
-      error.value = 'BLE init failed: $e';
+      error.value = 'Setup failed: $e';
+      print('[BLE] Setup error: $e');
     } finally {
       _scanInFlight = false;
     }
@@ -433,18 +444,70 @@ class Root extends StatefulWidget {
 class _RootState extends State<Root> {
   final BleController ble = BleController();
   Timer? _debounce;
+  
+  late MediaListener _mediaListener;
 
   @override
   void initState() {
     super.initState();
-    ble.scanAndConnect();
+    
+    ble.status.addListener(() {
+      if (ble.status.value == ConnStatus.error && ble.device != null) {
+        Future.delayed(const Duration(seconds: 2), () {
+          if (ble.status.value == ConnStatus.error) {
+            print('[BLE] Auto-reconnecting...');
+            _connectWithRetry(2);
+          }
+        });
+      }
+    });
+    
+    _connectWithRetry(3);
+    
+    if (Platform.isAndroid) {
+      _mediaListener = MediaListener(context);
+      _mediaListener.onMediaChanged = (info) {
+        if (ble.status.value == ConnStatus.connected && ble.desired.value.mode == 'bt') {
+          ble.sendPatch({
+            'artist': info.artist,
+            'title': info.title,
+            'album': info.album,
+          });
+        }
+      };
+      _mediaListener.start();
+    }
   }
 
   @override
   void dispose() {
     _debounce?.cancel();
+    if (Platform.isAndroid) {
+      _mediaListener.stop();
+    }
     ble.disconnect();
     super.dispose();
+  }
+
+  Future<void> _connectWithRetry(int maxRetries) async {
+    int attempt = 0;
+    while (attempt < maxRetries) {
+      attempt++;
+      print('[BLE] Connect attempt $attempt/$maxRetries');
+      
+      await ble.scanAndConnect(timeout: const Duration(seconds: 10));
+      await Future.delayed(const Duration(milliseconds: 500));
+      
+      if (ble.status.value == ConnStatus.connected) {
+        print('[BLE] Connected on attempt $attempt');
+        return;
+      }
+      
+      if (ble.status.value == ConnStatus.error && attempt < maxRetries) {
+        print('[BLE] Retry $attempt failed, trying again...');
+        await Future.delayed(const Duration(seconds: 1));
+      }
+    }
   }
 
   void _debounced(Duration d, VoidCallback f) {
@@ -569,7 +632,9 @@ class _RootState extends State<Root> {
                                     (st == ConnStatus.scanning) ? 'SCANNING…' : 'CONNECT',
                                     onPressed: (st == ConnStatus.scanning || st == ConnStatus.connecting)
                                         ? null
-                                        : () => ble.scanAndConnect(),
+                                        : () {
+                                            _connectWithRetry(3);
+                                          },
                                   ),
                                 ),
                                 const SizedBox(width: 10),
@@ -610,8 +675,6 @@ class _RootState extends State<Root> {
                                   await ble.sendPatch({
                                     'mode': m,
                                     'device_addr': next.deviceAddr,
-                                    'artist': next.artist,
-                                    'title': next.title,
                                     'connected': true,
                                   });
                                 }
@@ -626,11 +689,13 @@ class _RootState extends State<Root> {
                               value: desired.effect,
                               items: const [
                                 DropdownMenuItem(value: 'bars', child: Text('BARS')),
-                                DropdownMenuItem(value: 'vu', child: Text('VU')),
-                                DropdownMenuItem(value: 'osc', child: Text('OSC')),
-                                DropdownMenuItem(value: 'pulse', child: Text('PULSE')),
-                                DropdownMenuItem(value: 'fire', child: Text('FIRE')),
-                                DropdownMenuItem(value: 'wave', child: Text('WAVE')),
+                                DropdownMenuItem(value: 'osc', child: Text('OSCILLOSCOPE')),
+                                DropdownMenuItem(value: 'pulse', child: Text('RADIAL PULSE')),
+                                DropdownMenuItem(value: 'fire', child: Text('SPECTRAL FIRE')),
+                                DropdownMenuItem(value: 'plasma', child: Text('PLASMA')),
+                                DropdownMenuItem(value: 'spiral', child: Text('SPIRAL')),
+                                DropdownMenuItem(value: 'ripple', child: Text('RIPPLE')),
+                                DropdownMenuItem(value: 'kaleidoscope', child: Text('KALEIDOSCOPE')),
                               ],
                               onChanged: (v) async {
                                 if (v == null) return;
@@ -679,26 +744,6 @@ class _RootState extends State<Root> {
                           ],
                         ),
                       ),
-                      // CutPanel(
-                      //   child: ValueListenableBuilder<VizState>(
-                      //     valueListenable: ble.remote,
-                      //     builder: (context, remote, _) {
-                      //       final a = remote.artist.isEmpty ? desired.artist : remote.artist;
-                      //       final t = remote.title.isEmpty ? desired.title : remote.title;
-
-                      //       return Column(
-                      //         crossAxisAlignment: CrossAxisAlignment.start,
-                      //         children: [
-                      //           Text('NOW PLAYING', style: TextStyle(color: Retro.yellow, fontSize: 18, letterSpacing: 2)),
-                      //           const SizedBox(height: 10),
-                      //           Text('ARTIST: ${a.isEmpty ? "-" : a}', style: const TextStyle(fontSize: 18)),
-                      //           const SizedBox(height: 6),
-                      //           Text('TITLE:  ${t.isEmpty ? "-" : t}', style: const TextStyle(fontSize: 18)),
-                      //         ],
-                      //       );
-                      //     },
-                      //   ),
-                      // ),
                     ],
                   ),
                 );
@@ -711,7 +756,7 @@ class _RootState extends State<Root> {
   }
 }
 
-// ===================== Cut Panel + bevel =====================
+// ===================== UI Components =====================
 class CutPanel extends StatelessWidget {
   final Widget child;
   final double cut;

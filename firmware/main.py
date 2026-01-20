@@ -20,24 +20,26 @@ from firmware.effects.bars import BarsEffect
 from firmware.effects.oscilloscope import OscilloscopeEffect
 from firmware.effects.radial_pulse import RadialPulseEffect
 from firmware.effects.spectral_fire import SpectralFireEffect
-from firmware.effects.vu_meter import VUMeterEffect
-from firmware.effects.wave import WaveEffect
+from firmware.effects.plasma import PlasmaEffect
+from firmware.effects.spiral import SpiralEffect
+from firmware.effects.ripple import RippleEffect
+from firmware.effects.kaleidoscope import KaleidoscopeEffect
 
 from firmware.bt.ble_gatt_server import start_ble, SHARED
 
 
-# ===== CONFIG =====
-W, H = 16, 16
-NUM_LEDS = W * H
+# config
+W, H = 16, 16 # LED matrix width and height
+NUM_LEDS = W * H # Total number of LEDs
 
-PORT = "/dev/ttyUSB0"
-BAUD = 115200
+PORT = "/dev/ttyUSB0" # Serial port for LED driver
+BAUD = 115200 # Serial baud rate for LED driver (it could be 921600, but 115200 is more stable)
 
-FPS_LED = 20.0
-FPS_LCD = 20.0
+FPS_LED = 20.0 # LED update rate
+FPS_LCD = 20.0 # LCD update rate
 
-SR = 44100
-NFFT = 1024
+SR = 44100 # Sample rate (for audio input - mic/BT)
+NFFT = 1024 # FFT size for feature extraction 
 
 
 # ===== HELPERS =====
@@ -74,8 +76,10 @@ def make_effects(w=W, h=H):
         "osc": OscilloscopeEffect(w=w, h=h),
         "pulse": RadialPulseEffect(w=w, h=h),
         "fire": SpectralFireEffect(w=w, h=h),
-        "vu": VUMeterEffect(w=w, h=h),
-        "wave": WaveEffect(w=w, h=h),
+        "plasma": PlasmaEffect(w=w, h=h),
+        "spiral": SpiralEffect(w=w, h=h),
+        "ripple": RippleEffect(w=w, h=h),
+        "kaleidoscope": KaleidoscopeEffect(w=w, h=h),
     }
 
 
