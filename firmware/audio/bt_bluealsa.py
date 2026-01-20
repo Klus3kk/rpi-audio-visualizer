@@ -1,9 +1,3 @@
-# firmware/audio/bt_bluealsa.py
-# Read BT A2DP audio via BlueALSA using arecord (raw PCM).
-# FIX:
-# - no bluealsa-aplay here (it can steal A2DP stream from arecord)
-# - non-blocking pipe read + internal buffer (never blocks caller)
-
 import os
 import subprocess
 import threading
@@ -13,13 +7,7 @@ import fcntl
 
 
 class BlueAlsaInput:
-    def __init__(
-        self,
-        bt_addr: str | None,
-        rate: int = 44100,
-        channels: int = 2,
-        chunk_frames: int = 1024,
-    ):
+    def __init__(self, bt_addr: str | None, rate: int = 44100, channels: int = 2, chunk_frames: int = 1024):
         self.bt_addr = bt_addr or os.environ.get("VIS_BT_ADDR")
         self.rate = int(rate)
         self.channels = int(channels)
@@ -40,27 +28,31 @@ class BlueAlsaInput:
             if not self.bt_addr:
                 raise RuntimeError("BlueAlsaInput: bt_addr is None (set VIS_BT_ADDR or pass bt_addr)")
 
-            dev = f"bluealsa:DEV={self.bt_addr},PROFILE=a2dp"
+            dev = f"bluealsa:DEV={self.bt_addr},PROFILE=a2dp,SRV=org.bluealsa"
             fmt = "S16_LE"
 
             self._arec = subprocess.Popen(
                 [
                     "arecord",
-                    "-q",
                     "-D", dev,
                     "-f", fmt,
                     "-c", str(self.channels),
                     "-r", str(self.rate),
                     "-t", "raw",
+                    "-q",
                 ],
                 stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,   # <= zmiana (debug)
                 bufsize=0,
             )
+
             if self._arec.stdout is None:
                 raise RuntimeError("BlueAlsaInput: arecord has no stdout")
 
             self._set_nonblocking(self._arec.stdout.fileno())
+            if self._arec.stderr is not None:
+                self._set_nonblocking(self._arec.stderr.fileno())
+
             self._buf.clear()
 
     def stop(self):
@@ -78,24 +70,51 @@ class BlueAlsaInput:
         with self._lock:
             return self._arec is not None and (self._arec.poll() is None)
 
+    def _drain_stderr(self, p: subprocess.Popen):
+        # tylko do diagnozy: jeśli arecord się wysypuje, tu zobaczysz dlaczego
+        try:
+            if p.stderr is None:
+                return
+            fd = p.stderr.fileno()
+            r, _, _ = select.select([fd], [], [], 0.0)
+            if r:
+                data = os.read(fd, 8192)
+                if data:
+                    msg = data.decode("utf-8", "ignore").strip()
+                    if msg:
+                        print(f"[BlueAlsaInput] arecord: {msg}", file=sys.stderr)
+        except Exception:
+            pass
+
     def read_mono_f32(self) -> np.ndarray:
         with self._lock:
             p = self._arec
-            if p is None or p.stdout is None or p.poll() is not None:
+            if p is None or p.stdout is None:
+                return np.zeros(self.chunk_frames, dtype=np.float32)
+
+            if p.poll() is not None:
+                # spróbuj wypisać powód
+                try:
+                    if p.stderr is not None:
+                        err = p.stderr.read().decode("utf-8", "ignore").strip()
+                        if err:
+                            print(f"[BlueAlsaInput] arecord exited: {err}", file=sys.stderr)
+                except Exception:
+                    pass
                 return np.zeros(self.chunk_frames, dtype=np.float32)
 
             need_samples = self.chunk_frames * self.channels
-            need_bytes = need_samples * 2  # S16_LE
+            need_bytes = need_samples * 2
 
             fd = p.stdout.fileno()
 
-            # pull what is available now (never block)
+            # mini-timeout zamiast 0.0
             try:
-                r, _, _ = select.select([fd], [], [], 0.0)
+                r, _, _ = select.select([fd], [], [], 0.002)
                 if r:
-                    for _ in range(16):
+                    for _ in range(32):
                         try:
-                            chunk = os.read(fd, 4096)
+                            chunk = os.read(fd, 8192)
                         except BlockingIOError:
                             break
                         except Exception:
