@@ -286,8 +286,8 @@ def main():
     led_sender = LedSender(leds)
     led_sender.start()
 
-    # Initialize feature extractor (LINEAR bands 1250-20kHz)
-    fe = FeatureExtractor(samplerate=SR, nfft=NFFT, bands=16, fmin=1250, fmax=20000)
+    # Initialize feature extractor (LINEAR bands 500-16kHz)
+    fe = FeatureExtractor(samplerate=SR, nfft=NFFT, bands=16, fmin=500, fmax=16000)
 
     # Initialize audio hub
     audio = AudioHub(sr=SR, nfft=NFFT)
@@ -333,7 +333,7 @@ def main():
 
             # ===== MODE SELECTION =====
             raw_mode = str(st.get("mode", "mic")).lower()
-            desired_mode = "bt" if (raw_mode == "bt" and bool(st.get("connected", False))) else "mic"
+            desired_mode = "bt" if (raw_mode == "bt") else "mic"
 
             # ===== EFFECT SELECTION =====
             desired_fx = str(st.get("effect", effect_name)).lower()
