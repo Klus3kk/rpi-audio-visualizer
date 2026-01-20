@@ -13,7 +13,7 @@ import sounddevice as sd
 from firmware.ui.lcd_ui import LCDUI
 from firmware.audio.features import FeatureExtractor
 from firmware.audio.bt_bluealsa import BlueAlsaInput
-from firmware.audio.metadata import BtMetadata, bt_metadata_loop
+from firmware.bt.metadata import BtMetadata, bt_metadata_loop
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 
 from firmware.effects.bars import BarsEffect
