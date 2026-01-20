@@ -18,7 +18,11 @@ class BarsEffect:
         self.hsv_s = 1.0
         self.hsv_v = 0.22
 
-        self.base_hue = np.linspace(0.0, 1.0, self.w, dtype=np.float32)
+        # Pasma: 1250Hz do 20kHz (liniowo)
+        # Każde pasmo ~1172 Hz (18750/16)
+        # Kolory: od zielonego (1250Hz) przez żółty/pomarańczowy do czerwonego (20kHz)
+        # HSV: hue od 0.33 (zielony) do 0.0 (czerwony)
+        self.base_hue = np.linspace(0.33, 0.0, self.w, dtype=np.float32)
 
     def update(self, features, dt, params=None):
         try:

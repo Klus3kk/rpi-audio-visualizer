@@ -3,14 +3,15 @@ import time
 import spidev
 import lgpio
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-
+import io
+import requests
+from typing import Optional
 
 class LCDUI:
     """
-    Minimalny Nokia-like neon UI na ST7789:
-    - tylko MIC / BT
-    - czarne tło + neon blue
-    - spidev + lgpio (bez luma, bez RPi.GPIO)
+    LCD UI z okładką albumu + metadata dla BT.
+    - MIC: pokazuje audio meters
+    - BT: pokazuje okładkę (jeśli dostępna) + wykonawca + tytuł
     """
 
     def __init__(
@@ -21,16 +22,16 @@ class LCDUI:
         spi_hz=24_000_000,
         dc=25,
         rst=24,
-        cs_gpio=5,          # None jeśli używasz sprzętowego CE0/CE1
-        rotate=270,         # 90/270 - u Ciebie działa 270
-        mirror=True,        # jeśli lustrzane: False
-        panel_invert=True,  # jeśli kolory "odwrócone": True/False
+        cs_gpio=5,
+        rotate=270,
+        mirror=True,
+        panel_invert=True,
         w_panel=240,
         h_panel=320,
         font_path="/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         font_size=13,
         font_size_big=18,
-        accent=(30, 140, 255),   # <-- TERAZ DZIAŁA (BLUE)
+        accent=(30, 140, 255),
         bg=(0, 0, 0),
         dim=0.90,
     ):
@@ -58,7 +59,7 @@ class LCDUI:
         self.dim = float(dim)
 
         # state
-        self.mode = "mic"          # mic/bt
+        self.mode = "mic"
         self.effect = "bars"
         self.intensity = 0.75
         self.color_mode = "auto"
@@ -74,6 +75,11 @@ class LCDUI:
         self.bt_connected = False
         self.artist = ""
         self.title = ""
+        self.album = ""
+        self.cover_url = ""  # URL okładki (jeśli dostępna)
+        
+        self._cover_cache: Optional[Image.Image] = None
+        self._cover_cache_url = ""
 
         # fonts
         try:
@@ -136,9 +142,11 @@ class LCDUI:
         self.bt_name = (device_name or "")[:22]
         self.bt_addr = (device_addr or "")[:22]
 
-    def set_track(self, *, artist: str = "", title: str = ""):
-        self.artist = (artist or "")[:18]
-        self.title = (title or "")[:18]
+    def set_track(self, *, artist: str = "", title: str = "", album: str = "", cover_url: str = ""):
+        self.artist = (artist or "")[:32]
+        self.title = (title or "")[:32]
+        self.album = (album or "")[:32]
+        self.cover_url = (cover_url or "").strip()
 
     def close(self):
         try:
@@ -245,6 +253,27 @@ class LCDUI:
         s = (s or "").strip()
         return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
 
+    def _fetch_cover(self, url: str) -> Optional[Image.Image]:
+        """Pobiera okładkę z URL (z cache)."""
+        if not url:
+            return None
+        if url == self._cover_cache_url and self._cover_cache is not None:
+            return self._cover_cache
+        
+        try:
+            resp = requests.get(url, timeout=2)
+            if resp.status_code == 200:
+                cover = Image.open(io.BytesIO(resp.content))
+                cover = cover.convert("RGB")
+                # Resize do kwadratu 160x160 (na lewej połowie ekranu)
+                cover = cover.resize((160, 160), Image.Resampling.LANCZOS)
+                self._cover_cache = cover
+                self._cover_cache_url = url
+                return cover
+        except Exception:
+            pass
+        return None
+
     def render(self):
         # colors
         ACC = self._mul(self.accent, self.dim)
@@ -256,7 +285,7 @@ class LCDUI:
         img = Image.new("RGB", (self.W, self.H), self.bg)
         d = ImageDraw.Draw(img)
 
-        # header (no animation)
+        # header
         d.rectangle((0, 0, self.W - 1, 34), fill=(0, 0, 0), outline=GRID, width=2)
         d.text((10, 7), "VISUALIZER", fill=TXT, font=self.font)
         d.text((170, 7), self._ell(f"FX:{self.effect}", 12), fill=SUB, font=self.font)
@@ -280,31 +309,56 @@ class LCDUI:
         # main panel
         d.rectangle((10, 78, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)
 
-        # left: audio meters
-        d.text((18, 86), "AUDIO", fill=ACC, font=self.font)
-        d.text((18, 106), f"RMS {self.rms:.3f}", fill=TXT, font=self.font_small)
-        d.text((18, 124), f"B  {self.bass:.2f}", fill=SUB, font=self.font_small)
-        d.text((18, 140), f"M  {self.mid:.2f}", fill=SUB, font=self.font_small)
-        d.text((18, 156), f"T  {self.treble:.2f}", fill=SUB, font=self.font_small)
-
-        # right: mode info
-        rx = 150
-        d.text((rx, 86), "MODE", fill=ACC, font=self.font)
         if self.mode == "mic":
+            # MIC MODE: audio meters (jak dotychczas)
+            d.text((18, 86), "AUDIO", fill=ACC, font=self.font)
+            d.text((18, 106), f"RMS {self.rms:.3f}", fill=TXT, font=self.font_small)
+            d.text((18, 124), f"B  {self.bass:.2f}", fill=SUB, font=self.font_small)
+            d.text((18, 140), f"M  {self.mid:.2f}", fill=SUB, font=self.font_small)
+            d.text((18, 156), f"T  {self.treble:.2f}", fill=SUB, font=self.font_small)
+
+            rx = 150
+            d.text((rx, 86), "MODE", fill=ACC, font=self.font)
             d.text((rx, 106), "MIC INPUT", fill=TXT, font=self.font_small)
             d.text((rx, 124), self._ell(self.status or "mic mode", 18), fill=SUB, font=self.font_small)
-        else:
-            st = "CONNECTED" if self.bt_connected else "IDLE"
-            d.text((rx, 106), f"BT {st}", fill=(ACC if self.bt_connected else SUB), font=self.font_small)
-            if self.bt_name:
-                d.text((rx, 124), self._ell(self.bt_name, 18), fill=TXT, font=self.font_small)
-            if self.bt_addr:
-                d.text((rx, 140), self._ell(self.bt_addr, 18), fill=SUB, font=self.font_small)
 
-            if self.artist or self.title:
-                d.text((rx, 160), "NOW", fill=ACC, font=self.font_small)
-                d.text((rx, 176), self._ell(self.artist, 18), fill=TXT, font=self.font_small)
-                d.text((rx, 192), self._ell(self.title, 18), fill=TXT, font=self.font_small)
+        else:
+            # BT MODE: okładka + metadata
+            d.text((18, 86), "BLUETOOTH", fill=ACC, font=self.font)
+            
+            if self.bt_connected:
+                # Okładka (lewa połowa: 160x160)
+                cover = self._fetch_cover(self.cover_url)
+                if cover:
+                    # Paste cover na (20, 100)
+                    img.paste(cover, (20, 100))
+                else:
+                    # Placeholder: szary kwadrat z ikoną
+                    d.rectangle((20, 100, 180, 260), fill=(30, 30, 30), outline=GRID, width=2)
+                    d.text((70, 170), "NO COVER", fill=SUB, font=self.font_small)
+
+                # Metadata (prawa połowa: x=190+)
+                rx = 190
+                d.text((rx, 110), "NOW PLAYING", fill=ACC, font=self.font_small)
+                
+                # Wykonawca
+                artist_txt = self._ell(self.artist or "Unknown", 16)
+                d.text((rx, 130), artist_txt, fill=TXT, font=self.font_small)
+                
+                # Tytuł
+                title_txt = self._ell(self.title or "Unknown", 16)
+                d.text((rx, 150), title_txt, fill=TXT, font=self.font_small)
+                
+                # Album (opcjonalnie)
+                if self.album:
+                    album_txt = self._ell(self.album, 16)
+                    d.text((rx, 170), album_txt, fill=SUB, font=self.font_small)
+
+                # Status device
+                d.text((rx, 200), "DEVICE", fill=ACC, font=self.font_small)
+                d.text((rx, 216), self._ell(self.bt_name, 16), fill=SUB, font=self.font_small)
+            else:
+                d.text((18, 110), "NOT CONNECTED", fill=SUB, font=self.font)
 
         # bottom status strip
         d.rectangle((10, self.H - 38, self.W - 10, self.H - 10), fill=(0, 0, 0), outline=GRID, width=2)

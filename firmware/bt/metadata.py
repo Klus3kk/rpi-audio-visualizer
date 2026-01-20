@@ -9,7 +9,13 @@ OBJMGR_IFACE = "org.freedesktop.DBus.ObjectManager"
 
 class BtMetadata:
     def __init__(self):
-        self.track = {"Title": "", "Artist": "", "Album": "", "Duration": 0}
+        self.track = {
+            "Title": "",
+            "Artist": "",
+            "Album": "",
+            "Duration": 0,
+            "AlbumArtURL": "",  # Dodatkowe pole dla okładki (jeśli dostępne)
+        }
         self.connected = False
         self._bus = None
         self._props = None
@@ -51,7 +57,7 @@ class BtMetadata:
 
     def _apply_track(self, d):
         if isinstance(d, dict):
-            for k in ["Title", "Artist", "Album", "Duration"]:
+            for k in ["Title", "Artist", "Album", "Duration", "AlbumArtURL"]:
                 if k in d:
                     v = d[k]
                     self.track[k] = v.value if hasattr(v, "value") else v
@@ -69,10 +75,11 @@ class BtMetadata:
             "artist": self.track.get("Artist", "") or "",
             "album": self.track.get("Album", "") or "",
             "duration_ms": int(self.track.get("Duration", 0) or 0),
+            "cover_url": self.track.get("AlbumArtURL", "") or "",
         }
 
 async def bt_metadata_loop(meta: BtMetadata):
-    # utrzymuj “connected” nawet jak BT się pojawia później
+    # utrzymuj "connected" nawet jak BT się pojawia później
     while True:
         try:
             await meta.start()

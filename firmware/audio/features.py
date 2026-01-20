@@ -4,7 +4,7 @@ def _hz_to_bin(freq_hz, nfft, sr):
     return int(np.floor((freq_hz / (sr / 2.0)) * (nfft // 2)))
 
 class FeatureExtractor:
-    def __init__(self, samplerate=44100, nfft=1024, bands=16, fmin=40, fmax=16000):
+    def __init__(self, samplerate=44100, nfft=1024, bands=16, fmin=1250, fmax=20000):
         self.sr = int(samplerate)
         self.nfft = int(nfft)
         self.bands = int(bands)
@@ -14,7 +14,8 @@ class FeatureExtractor:
         self.window = np.hanning(self.nfft).astype(np.float32)
         self.prev_bands = np.zeros(self.bands, dtype=np.float32)
 
-        edges_hz = np.geomspace(self.fmin, self.fmax, num=self.bands + 1)
+        # LINEAR spacing: 1250Hz do 20kHz = 18750 Hz / 16 pasm = ~1172 Hz na pasmo
+        edges_hz = np.linspace(self.fmin, self.fmax, num=self.bands + 1)
         self.edges = []
         for i in range(self.bands):
             lo = max(1, _hz_to_bin(edges_hz[i], self.nfft, self.sr))
@@ -51,9 +52,9 @@ class FeatureExtractor:
         self.prev_bands = band_db
 
         # STAŁA skala: noise floor i zakres dynamiczny
-        NOISE_FLOOR_DB = -85.0   # było -75 (za wysoko)
-        RANGE_DB = 55.0          # było 45 (łatwiej wejść w 0..1)
-        RMS_GATE = 0.006         # było 0.012 (za agresywnie)
+        NOISE_FLOOR_DB = -85.0
+        RANGE_DB = 55.0
+        RMS_GATE = 0.006
 
         # mapowanie do 0..1
         bands_norm = (band_db - NOISE_FLOOR_DB) / RANGE_DB
@@ -62,9 +63,12 @@ class FeatureExtractor:
         if rms < RMS_GATE:
             bands_norm[:] = 0.0
 
-        bass = float(np.mean(bands_norm[: max(1, self.bands // 10)]))
-        mid = float(np.mean(bands_norm[self.bands // 6 : 4 * self.bands // 6]))
-        treble = float(np.mean(bands_norm[4 * self.bands // 6 :]))
+        # bass/mid/treble - teraz wszystkie pasma są w zakresie 1.25-20kHz
+        # więc bass = dolne 1/3, mid = środkowe 1/3, treble = górne 1/3
+        third = max(1, self.bands // 3)
+        bass = float(np.mean(bands_norm[:third]))
+        mid = float(np.mean(bands_norm[third:2*third]))
+        treble = float(np.mean(bands_norm[2*third:]))
 
         return {
             "rms": rms,
@@ -74,6 +78,5 @@ class FeatureExtractor:
             "treble": treble,
             "samplerate": self.sr,
             "nfft": self.nfft,
-            "mag": mag2,          
+            "mag": mag2,
         }
-
