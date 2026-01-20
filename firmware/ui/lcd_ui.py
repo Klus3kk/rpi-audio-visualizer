@@ -3,8 +3,6 @@ import time
 import spidev
 import lgpio
 from PIL import Image, ImageDraw, ImageFont, ImageOps
-import io
-import requests
 from typing import Optional
 
 class LCDUI:
@@ -76,10 +74,8 @@ class LCDUI:
         self.artist = ""
         self.title = ""
         self.album = ""
-        self.cover_url = ""  # URL okładki (jeśli dostępna)
         
         self._cover_cache: Optional[Image.Image] = None
-        self._cover_cache_url = ""
 
         # fonts
         try:
@@ -142,11 +138,10 @@ class LCDUI:
         self.bt_name = (device_name or "")[:22]
         self.bt_addr = (device_addr or "")[:22]
 
-    def set_track(self, *, artist: str = "", title: str = "", album: str = "", cover_url: str = ""):
+    def set_track(self, *, artist: str = "", title: str = "", album: str = ""):
         self.artist = (artist or "")[:32]
         self.title = (title or "")[:32]
         self.album = (album or "")[:32]
-        self.cover_url = (cover_url or "").strip()
 
     def close(self):
         try:
@@ -253,27 +248,6 @@ class LCDUI:
         s = (s or "").strip()
         return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
 
-    def _fetch_cover(self, url: str) -> Optional[Image.Image]:
-        """Pobiera okładkę z URL (z cache)."""
-        if not url:
-            return None
-        if url == self._cover_cache_url and self._cover_cache is not None:
-            return self._cover_cache
-        
-        try:
-            resp = requests.get(url, timeout=2)
-            if resp.status_code == 200:
-                cover = Image.open(io.BytesIO(resp.content))
-                cover = cover.convert("RGB")
-                # Resize do kwadratu 160x160 (na lewej połowie ekranu)
-                cover = cover.resize((160, 160), Image.Resampling.LANCZOS)
-                self._cover_cache = cover
-                self._cover_cache_url = url
-                return cover
-        except Exception:
-            pass
-        return None
-
     def render(self):
         # colors
         ACC = self._mul(self.accent, self.dim)
@@ -323,40 +297,29 @@ class LCDUI:
             d.text((rx, 124), self._ell(self.status or "mic mode", 18), fill=SUB, font=self.font_small)
 
         else:
-            # BT MODE: okładka + metadata
+            # BT MODE: metadata (text only, no cover)
             d.text((18, 86), "BLUETOOTH", fill=ACC, font=self.font)
             
             if self.bt_connected:
-                # Okładka (lewa połowa: 160x160)
-                cover = self._fetch_cover(self.cover_url)
-                if cover:
-                    # Paste cover na (20, 100)
-                    img.paste(cover, (20, 100))
-                else:
-                    # Placeholder: szary kwadrat z ikoną
-                    d.rectangle((20, 100, 180, 260), fill=(30, 30, 30), outline=GRID, width=2)
-                    d.text((70, 170), "NO COVER", fill=SUB, font=self.font_small)
-
-                # Metadata (prawa połowa: x=190+)
-                rx = 190
-                d.text((rx, 110), "NOW PLAYING", fill=ACC, font=self.font_small)
+                # Now Playing info (centered, larger text)
+                d.text((18, 110), "NOW PLAYING", fill=ACC, font=self.font_small)
                 
-                # Wykonawca
-                artist_txt = self._ell(self.artist or "Unknown", 16)
-                d.text((rx, 130), artist_txt, fill=TXT, font=self.font_small)
+                # Artist (big, bold)
+                artist_txt = self._ell(self.artist or "Unknown Artist", 24)
+                d.text((18, 130), artist_txt, fill=TXT, font=self.font_big)
                 
-                # Tytuł
-                title_txt = self._ell(self.title or "Unknown", 16)
-                d.text((rx, 150), title_txt, fill=TXT, font=self.font_small)
+                # Title
+                title_txt = self._ell(self.title or "Unknown Title", 28)
+                d.text((18, 155), title_txt, fill=TXT, font=self.font)
                 
-                # Album (opcjonalnie)
+                # Album (smaller, dimmed)
                 if self.album:
-                    album_txt = self._ell(self.album, 16)
-                    d.text((rx, 170), album_txt, fill=SUB, font=self.font_small)
+                    album_txt = self._ell(self.album, 28)
+                    d.text((18, 175), album_txt, fill=SUB, font=self.font_small)
 
-                # Status device
-                d.text((rx, 200), "DEVICE", fill=ACC, font=self.font_small)
-                d.text((rx, 216), self._ell(self.bt_name, 16), fill=SUB, font=self.font_small)
+                # Device info at bottom
+                d.text((18, 200), "DEVICE", fill=ACC, font=self.font_small)
+                d.text((18, 216), self._ell(self.bt_name, 24), fill=SUB, font=self.font_small)
             else:
                 d.text((18, 110), "NOT CONNECTED", fill=SUB, font=self.font)
 

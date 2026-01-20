@@ -51,13 +51,12 @@ class SharedState:
             "smoothing": 0.65,
             "color_mode": "auto",
 
-            # optional metadata (apka może wysyłać)
+            # metadata (apka może wysyłać)
             "device_name": "",
             "device_addr": "",
             "artist": "",
             "title": "",
             "album": "",
-            "cover_url": "",
             "connected": False,
         }
 

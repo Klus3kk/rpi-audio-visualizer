@@ -389,8 +389,7 @@ def main():
                         artist = str(st.get("artist", "") or "")
                         title  = str(st.get("title", "") or "")
                         album  = str(st.get("album", "") or "")
-                        cover_url = str(st.get("cover_url", "") or "")
-                        ui.set_track(artist=artist, title=title, album=album, cover_url=cover_url)
+                        ui.set_track(artist=artist, title=title, album=album)
                         ui.set_status(f"bt | gain={params['gain']:.2f}")
                     else:
                         ui.set_status(f"mic | gain={params['gain']:.2f}")
