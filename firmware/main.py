@@ -286,8 +286,8 @@ def main():
     led_sender = LedSender(leds)
     led_sender.start()
 
-    # Initialize feature extractor (LINEAR bands 500-16kHz)
-    fe = FeatureExtractor(samplerate=SR, nfft=NFFT, bands=16, fmin=500, fmax=16000)
+    # Initialize feature extractor (LINEAR bands 20-20kHz)
+    fe = FeatureExtractor(samplerate=SR, nfft=NFFT, bands=16, fmin=20, fmax=20000)
 
     # Initialize audio hub
     audio = AudioHub(sr=SR, nfft=NFFT)

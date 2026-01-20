@@ -18,20 +18,28 @@ class BarsEffect:
         self.hsv_s = 1.0
         self.hsv_v = 0.22
 
-        # Pasma: 1250Hz do 20kHz (liniowo)
-        # Każde pasmo ~1172 Hz (18750/16)
-        # Kolory: od zielonego (1250Hz) przez żółty/pomarańczowy do czerwonego (20kHz)
-        # HSV: hue od 0.33 (zielony) do 0.0 (czerwony)
-        self.base_hue = np.linspace(0.33, 0.0, self.w, dtype=np.float32)
+        # "chaotyczny" mapping pasm -> kolumny (stały, ale przestawiony)
+        # low->high dalej istnieje, tylko porozrzucane po X
+        self.map_idx = np.array([0, 8, 1, 12, 2, 10, 3, 14, 4, 9, 5, 13, 6, 11, 7, 15], dtype=np.int32)
+
+        # kolory naprzemiennie: zielony / pomarańczowy / czerwony
+        self.hues = np.array([0.33, 0.08, 0.00] * ((self.w + 2) // 3), dtype=np.float32)[:self.w]
+
+        # gauss po X (środek jaśniejszy)
+        x = np.arange(self.w, dtype=np.float32)
+        mu = (self.w - 1) / 2.0
+        sigma = 0.35 * self.w
+        g = np.exp(-0.5 * ((x - mu) / sigma) ** 2)
+        self.gauss = (g / (g.max() + 1e-9)).astype(np.float32)
 
     def update(self, features, dt, params=None):
         try:
             dt = float(dt) if dt else 0.02
-            intensity = float((params or {}).get("intensity", 0.75))
+            p = (params or {})
+            intensity = float(p.get("intensity", 0.75))
 
             bands = safe_bands(features, self.w)
             rms = safe_rms(features)
-
             if rms < 0.003:
                 bands[:] = 0.0
 
@@ -41,6 +49,14 @@ class BarsEffect:
 
             bands[bands < 0.02] = 0.0
             bands = np.clip(bands * (0.6 + 1.4 * intensity), 0.0, 1.0)
+
+            # rozrzucenie pasm po kolumnach
+            bands = bands[self.map_idx]
+
+            # gauss: środek wyżej, boki niżej (krzywa dzwonowa)
+            gauss_strength = float(p.get("bars_gauss", 0.55))  # 0..1
+            shape = (1.0 - gauss_strength) + gauss_strength * self.gauss
+            bands = np.clip(bands * shape, 0.0, 1.0)
 
             target = bands * (self.h - 1)
 
@@ -62,10 +78,11 @@ class BarsEffect:
 
             for x in range(self.w):
                 hh = int(self.level[x])
+                hcol = float(self.hues[x])
+                r, g, b = colorsys.hsv_to_rgb(hcol, self.hsv_s, self.hsv_v)
+                R, G, B = int(r * 255), int(g * 255), int(b * 255)
                 for y in range(hh + 1):
-                    hcol = self.base_hue[x]
-                    r,g,b = colorsys.hsv_to_rgb(hcol, self.hsv_s, self.hsv_v)
-                    frame[y * self.w + x] = (int(r*255), int(g*255), int(b*255))
+                    frame[y * self.w + x] = (R, G, B)
 
             return frame
         except Exception:
