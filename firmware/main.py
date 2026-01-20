@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-
-# Main entry point for Visualizer firmware
 # Run: python3 -u -m firmware.main
 
+import asyncio
 import traceback
 import sys
 import threading
@@ -14,6 +13,7 @@ import sounddevice as sd
 from firmware.ui.lcd_ui import LCDUI
 from firmware.audio.features import FeatureExtractor
 from firmware.audio.bt_bluealsa import BlueAlsaInput
+from firmware.audio.metadata import BtMetadata, bt_metadata_loop
 from firmware.led.esp32_serial_driver import Esp32SerialDriver
 
 from firmware.effects.bars import BarsEffect
@@ -28,7 +28,6 @@ from firmware.effects.kaleidoscope import KaleidoscopeEffect
 from firmware.bt.ble_gatt_server import start_ble, SHARED
 
 
-# config
 W, H = 16, 16
 NUM_LEDS = W * H
 
@@ -42,7 +41,6 @@ SR = 44100
 NFFT = 1024
 
 
-# ===== HELPERS =====
 def log_exc(tag: str, e: Exception):
     print(f"[ERR] {tag}: {e}", file=sys.stderr)
     traceback.print_exc()
@@ -121,7 +119,6 @@ def get_state():
         return {}
 
 
-# ===== BLE THREAD =====
 def ble_thread():
     try:
         start_ble()
@@ -129,7 +126,6 @@ def ble_thread():
         log_exc("BLE thread", e)
 
 
-# ===== LED SENDER (non-blocking serial) =====
 class LedSender(threading.Thread):
     def __init__(self, leds: Esp32SerialDriver):
         super().__init__(daemon=True)
@@ -165,7 +161,6 @@ class LedSender(threading.Thread):
         self._stop.set()
 
 
-# ===== AUDIO HUB (MIC + BT) =====
 class AudioHub:
     def __init__(self, sr=SR, nfft=NFFT):
         self.sr = int(sr)
@@ -260,45 +255,40 @@ class AudioHub:
             self._mic = None
 
 
-# ===== MAIN LOOP =====
 def main():
     print("[INIT] Starting Visualizer firmware...")
-    
-    # Start BLE server (background thread)
+
     threading.Thread(target=ble_thread, daemon=True).start()
 
-    # Initialize LCD
+    meta = BtMetadata()
+    threading.Thread(target=lambda: asyncio.run(bt_metadata_loop(meta)), daemon=True).start()
+
     ui = LCDUI(
-        dc=25, rst=24, cs_gpio=5, # GPIO pins (DC=25, RST=24, CS=5)
-        spi_bus=0, spi_dev=0, spi_hz=24_000_000, # SPI config (spi_bus = SPI0, spi_dev = CE0, spi_hz = 24MHz)
-        rotate=270, # Rotate display 
-        mirror=True, # Mirrors the display horizontally
-        panel_invert=True, # Black on white panel
-        dim=0.80, # Initial brightness (0.0-1.0)
-        font_size=13, # Default font size
-        font_size_big=17, # Big font size
-        accent=(30, 140, 255), # Accent color (blue)
-        bg=(0, 0, 0), # Background color (white/black)
+        dc=25, rst=24, cs_gpio=5,
+        spi_bus=0, spi_dev=0, spi_hz=24_000_000,
+        rotate=270,
+        mirror=True,
+        panel_invert=False,
+        dim=0.80,
+        font_size=13,
+        font_size_big=17,
+        accent=(30, 140, 255),
+        bg=(0, 0, 0),
     )
 
-    # Initialize LED driver
     leds = Esp32SerialDriver(num_leds=NUM_LEDS, port=PORT, baud=BAUD, debug=False)
     led_sender = LedSender(leds)
     led_sender.start()
 
-    # Initialize feature extractor (LINEAR bands 20-20kHz)
     fe = FeatureExtractor(samplerate=SR, nfft=NFFT, bands=16, fmin=20, fmax=20000)
 
-    # Initialize audio hub
     audio = AudioHub(sr=SR, nfft=NFFT)
     audio.start_mic()
 
-    # Initialize effects
     effects = make_effects()
     effect_name = "bars"
     effect = effects[effect_name]
 
-    # Default params
     params = {
         "intensity": 0.75,
         "color_mode": "auto",
@@ -331,17 +321,14 @@ def main():
             now = time.monotonic()
             st = get_state()
 
-            # ===== MODE SELECTION =====
             raw_mode = str(st.get("mode", "mic")).lower()
             desired_mode = "bt" if (raw_mode == "bt") else "mic"
 
-            # ===== EFFECT SELECTION =====
             desired_fx = str(st.get("effect", effect_name)).lower()
             if desired_fx in effects and desired_fx != effect_name:
                 effect_name = desired_fx
                 effect = effects[effect_name]
 
-            # ===== PARAMS UPDATE =====
             params["brightness"] = f01(st.get("brightness", params["brightness"]), params["brightness"])
             params["intensity"] = f01(st.get("intensity", params["intensity"]), params["intensity"])
             params["gain"] = clamp_gain(st.get("gain", params["gain"]), params["gain"])
@@ -353,7 +340,6 @@ def main():
             except Exception:
                 pass
 
-            # ===== MODE SWITCH =====
             if desired_mode != current_mode:
                 current_mode = desired_mode
                 if current_mode == "bt":
@@ -367,7 +353,6 @@ def main():
                 else:
                     audio.stop_bt()
 
-            # ===== LCD UPDATE =====
             if now - t_lcd >= dt_lcd:
                 t_lcd = now
                 try:
@@ -380,28 +365,33 @@ def main():
                         mid=float(last_feats.get("mid", 0.0)),
                         treble=float(last_feats.get("treble", 0.0)),
                     )
+
                     if current_mode == "bt":
                         ui.set_bt(
                             connected=bool(st.get("connected", True)),
                             device_name=str(st.get("device_name", "")),
                             device_addr=str(st.get("device_addr", "")),
                         )
+
                         artist = str(st.get("artist", "") or "")
                         title  = str(st.get("title", "") or "")
                         album  = str(st.get("album", "") or "")
-                        
-                        # DEBUG
-                        print(f"[DEBUG] BT metadata: artist={artist}, title={title}, album={album}")
-                        
+
+                        if not artist and not title:
+                            ms = meta.snapshot()
+                            artist = ms.get("artist", "") or artist
+                            title  = ms.get("title", "") or title
+                            album  = ms.get("album", "") or album
+
                         ui.set_track(artist=artist, title=title, album=album)
                         ui.set_status(f"bt | gain={params['gain']:.2f}")
                     else:
                         ui.set_status(f"mic | gain={params['gain']:.2f}")
+
                     ui.render()
                 except Exception as e:
                     log_exc("LCDUI.render()", e)
 
-            # ===== AUDIO PROCESSING =====
             x = audio.get_latest(current_mode)
             x = x - float(np.mean(x))
             x = x * float(params["gain"])
@@ -413,7 +403,6 @@ def main():
             except Exception as e:
                 log_exc("FeatureExtractor.compute()", e)
 
-            # ===== LED UPDATE =====
             if now - t_led >= dt_led:
                 t_led = now
                 frame = safe_update_effect(effect, last_feats, dt_led, params, effect_name)
