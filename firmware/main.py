@@ -27,8 +27,6 @@ from firmware.effects.kaleidoscope import KaleidoscopeEffect
 
 from firmware.bt.ble_gatt_server import start_ble, SHARED
 
-
-# optional DBus metadata (works only if dbus_next installed)
 try:
     from firmware.bt.metadata import BtMetadata, bt_metadata_loop
     HAS_META = True
@@ -78,15 +76,36 @@ def clamp_gain(v, default=1.0):
     return max(0.05, min(6.0, g))
 
 
-def bt_connect(addr: str):
+def bt_is_connected(addr: str) -> bool:
     if not addr:
-        return
-    subprocess.run(
-        ["bluetoothctl", "connect", addr],
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        check=False,
-    )
+        return False
+    try:
+        out = subprocess.check_output(["bluetoothctl", "info", addr], text=True, stderr=subprocess.DEVNULL)
+        return "Connected: yes" in out
+    except Exception:
+        return False
+
+
+def bt_has_a2dp_pcm(addr: str) -> bool:
+    if not addr:
+        return False
+    try:
+        out = subprocess.check_output(["bluealsa-aplay", "-L"], text=True, stderr=subprocess.DEVNULL)
+        return f"DEV={addr}" in out and "PROFILE=a2dp" in out
+    except Exception:
+        return False
+
+
+def bt_autoconnect(addr: str, tries: int = 6, delay: float = 0.35) -> bool:
+    if not addr:
+        return False
+    subprocess.run(["bluetoothctl", "power", "on"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    for _ in range(tries):
+        subprocess.run(["bluetoothctl", "connect", addr], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(delay)
+        if bt_is_connected(addr):
+            return True
+    return bt_is_connected(addr)
 
 
 def make_effects(w=W, h=H):
@@ -325,6 +344,9 @@ def main():
     }
 
     current_mode = "mic"
+    bt_addr_cached = None
+    bt_ready = False
+    bt_last_try = 0.0
 
     t_led = time.monotonic()
     t_lcd = time.monotonic()
@@ -363,22 +385,35 @@ def main():
             except Exception:
                 pass
 
+            bt_addr = (str(st.get("device_addr", "")).strip() or None)
+            if bt_addr:
+                bt_addr_cached = bt_addr
+            elif bt_addr_cached:
+                bt_addr = bt_addr_cached
+
+            real_bt = bt_is_connected(bt_addr) if bt_addr else False
+            real_pcm = bt_has_a2dp_pcm(bt_addr) if bt_addr else False
+            bt_ready = bool(bt_addr and real_bt and real_pcm)
+
+            if desired_mode == "bt" and bt_addr and (now - bt_last_try) > 1.5 and not bt_ready:
+                bt_last_try = now
+                bt_autoconnect(bt_addr, tries=4, delay=0.35)
+
             if desired_mode != current_mode:
-                current_mode = desired_mode
-                if current_mode == "bt":
-                    bt_addr = str(st.get("device_addr", "")).strip() or None
-
-                    if bt_addr:
-                        bt_connect(bt_addr)
-                        time.sleep(0.3)
-
-                    try:
-                        audio.start_bt(bt_addr)
-                    except Exception as e:
-                        log_exc("audio.start_bt()", e)
-                        audio.stop_bt()
+                if desired_mode == "bt":
+                    if bt_addr and bt_ready:
+                        try:
+                            audio.start_bt(bt_addr)
+                            current_mode = "bt"
+                        except Exception as e:
+                            log_exc("audio.start_bt()", e)
+                            audio.stop_bt()
+                            current_mode = "mic"
+                    else:
                         current_mode = "mic"
+                        audio.stop_bt()
                 else:
+                    current_mode = "mic"
                     audio.stop_bt()
 
             if now - t_lcd >= dt_lcd:
@@ -396,9 +431,9 @@ def main():
 
                     if current_mode == "bt":
                         ui.set_bt(
-                            connected=bool(st.get("connected", True)),
+                            connected=bt_ready,
                             device_name=str(st.get("device_name", "")),
-                            device_addr=str(st.get("device_addr", "")),
+                            device_addr=str(bt_addr or ""),
                         )
 
                         artist = str(st.get("artist", "") or "")
@@ -412,7 +447,11 @@ def main():
                             album  = ms.get("album", "") or album
 
                         ui.set_track(artist=artist, title=title, album=album)
-                        ui.set_status(f"bt | gain={params['gain']:.2f}")
+
+                        if bt_ready:
+                            ui.set_status(f"bt(a2dp) | gain={params['gain']:.2f}")
+                        else:
+                            ui.set_status(f"bt(wait) | gain={params['gain']:.2f}")
                     else:
                         ui.set_status(f"mic | gain={params['gain']:.2f}")
 
@@ -434,7 +473,6 @@ def main():
             if now - t_led >= dt_led:
                 t_led = now
                 frame = safe_update_effect(effect, last_feats, dt_led, params, effect_name)
-
                 try:
                     if frame is None or len(frame) != NUM_LEDS:
                         frame = [(0, 0, 0)] * NUM_LEDS
